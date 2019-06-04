@@ -31,6 +31,8 @@ class MqttNachricht:
 
     def __init__(self,pattern,name):
         self.Nachricht = [0,"",pattern,name,60]
+        global _Mqtt_Topic_Liste
+        _Mqtt_Topic_Liste.append(self)
         self.Print()
 
     def Gueltig(self):
@@ -65,7 +67,6 @@ class MqttNachricht:
         self.Nachricht[4] = t
 
     def Print(self):
-        global Debug_Klasse, logger
         for i in Debug_Klasse:
             if i == self.__class__.__name__:
                 logger.info("Mqtt: {name:16s} t: {zeit:8s} v: {wert:8s} {gueltig:9s} Pattern {pattern:s}".format(
@@ -77,7 +78,6 @@ class MqttNachricht:
                 return
 
     def Subscribe(self):
-        global client, logger
         if not client.subscribe(self.Nachricht[2]):
             logger.error("Fehler bei subscribe to {s:s}".format(s=self.Nachricht[2]))
         else:
@@ -109,14 +109,12 @@ class MqttTemperatur(MqttNachricht):
                 if (stunde < 11) or (stunde > 21):
                     logger.info("Ausserhalb der Uhrzeiten")
                     return
-                global _Status_Helligkeit
                 if not _Status_Helligkeit.Gueltig():
                     logger.warning("Kein Helligkeitswert")
                     return
                 if (int(_Status_Helligkeit.Wert()) < 3000):
                     logger.info("Draussen ist dunkel (oder zumindest keine Sonne)")
                     return
-                global _Shelly_SZ
                 if _Shelly_SZ.Bereit_Oben():
                     logger.info("Alle Bedingungen passen, fahre Rollo runter")
                     _Shelly_SZ.Fahre80()
@@ -131,19 +129,13 @@ class Shelly:
     def __init__(self,pattern,name):
         self.Name = name
         self.Pattern = pattern
-        global _Mqtt_Topic_Liste
         self.Schalter_0 = MqttNachricht(pattern + "/input/0", name + "Schalter 0")
-        _Mqtt_Topic_Liste.append( self.Schalter_0)
         self.Schalter_1 = MqttNachricht(pattern + "/input/1", name + "Schalter 1")
-        _Mqtt_Topic_Liste.append( self.Schalter_1)
         self.Rollo = MqttNachricht(pattern + "/roller/0", name + "Rollo Status")
-        _Mqtt_Topic_Liste.append( self.Rollo)
         self.Rollo_Pos = MqttNachricht(pattern + "/roller/0/pos", name + "Rollo Position")
-        _Mqtt_Topic_Liste.append( self.Rollo_Pos)
         self.Print()
 
     def Print(self):
-        global Debug_Klasse, logger
         for i in Debug_Klasse:
             if i == self.__class__.__name__:
                 logger.info("Shelly: {name:16s} Pattern: {wert:8}".format(
@@ -160,39 +152,40 @@ class Shelly:
         Hier wird geprueft, ob der Shelly aktuelle Werte hat, die Schalter auf 0 stehen und kein Motor laeuft.
         In dem Fall ist 'Automatik-Mode' an.
         """
+        print("Bereit_Oben")
         if not self.Schalter_0.Gueltig():
-            logger.warning(self.name + " Schalter(0) kein aktueller Wert")
+            logger.warning("{name:s} Schalter(0) kein aktueller Wert".format(name=self.Name))
             return False
         if self.Schalter_0.Wert() != "0":
-            logger.info(self.name + " Schalter(0) nicht aus, Wert:",_Status_Schalter_0.Wert())
+            logger.info("{name:s} Schalter(0) nicht aus, Wert: {wert:s}".format(name=self.Name,wert=self.Schalter_0.Wert()))
             return False
         if not self.Schalter_1.Gueltig():
-            logger.warning(self.name + " Schalter(1) kein aktueller Wert")
+            logger.warning("{name:s} Schalter(1) kein aktueller Wert".format(name=self.Name))
             return False
         if self.Schalter_1.Wert() != "0":
-            logger.info(self.name + " Schalter(1) nicht aus, Wert:",_Status_Schalter_1.Wert())
+            logger.info("{name:s} Schalter(1) nicht aus, Wert: {wert:s}".format(name=self.Name,wert=self.Schalter_1.Wert()))
             return False
         if not self.Rollo.Gueltig():
-            logger.warning(self.name + " Rollo kein aktueller Wert")
+            logger.warning("{name:s} Rollo kein aktueller Wert".format(name=self.Name))
             return False
         if self.Rollo.Wert() != "stop":
-            logger.info(self.name + " Rollo laeuft, Wert:",self.Rollo.Wert())
+            logger.info("{name:s} Rollo laeuft, Wert: {wert:s}".format(name=self.Name,wert=self.Rollo.Wert()))
             return False
         if not self.Rollo_Pos.Gueltig():
-            logger.warning(self.name + " Rollo_Pos kein aktueller Wert")
+            logger.warning("{name:s} Rollo_Pos kein aktueller Wert".format(name=self.Name))
             return False
 #       if self.Rollo_Pos.Wert() != "0":
         if self.Rollo_Pos.Wert() != "-1":
-            logger.info(self.name + " Rollo Position nicht oben, Wert:",self.Rollo_Pos.Wert())
+            logger.info("{name:s} Rollo Position nicht oben, Wert: {wert:s}".format(name=self.Name,wert=self.Rollo_Pos.Wert()))
             return False
         # final, alle Tests bestanden, return true :-)
+        logger.info("{name:s} Bereit_Oben: True".format(name=self.Name))
         return True
 
     def Fahre80(self):
         """Shelly:Fahre80
         Gibt das Kommando auf 80% zu zu fahren
         """
-        global client
         if client.publish(self.Pattern + "/roller/0/command", "close"):
 #        if client.publish(self.Pattern + "/roller/0/command/pos", "80"):
             logger.info(self.name + " Rollo wird auf 80% gefahren")
@@ -201,12 +194,10 @@ class Shelly:
 
 def on_connect(client, userdata, flags, rc):
     logger.info("Connected with result code " + str(rc))
-    global _Mqtt_Topic_Liste
     for i in _Mqtt_Topic_Liste:
         i.Subscribe()
 
 def on_message(client, userdata, msg):
-    global _Mqtt_Topic_Liste
     for i in _Mqtt_Topic_Liste:
         if i.Update(msg.topic, msg.payload):
             break
@@ -223,14 +214,13 @@ def main():
     global logger
     logger = logging.getLogger()
 
-    global _Mqtt_Topic_Liste
+    global _Status_Helligkeit
     #<MqttMessage topic="Sensor/WZTuF/EG/WZ//H">34.1</MqttMessage>
     _Status_Helligkeit = MqttNachricht("Sensor/WZTuF/EG/WZ//H", "Helligkeit")
-    _Mqtt_Topic_Liste.append(_Status_Helligkeit)
     #<MqttMessage topic="Sensor/WZTuF/EG/WZ//T">34.1</MqttMessage>
     _Status_Temperatur = MqttTemperatur("Sensor/WZTuF/EG/WZ//T", "Temp Aussen")
-    _Mqtt_Topic_Liste.append(_Status_Temperatur)
 
+    global _Shelly_SZ
     _Shelly_SZ = Shelly("shellies/shellyswitch25-745815", "SZ")
 
     global client
@@ -242,8 +232,15 @@ def main():
 
     client.loop_forever()
 
+# das sind die globalen Variablen..
+# Für die Callbacks von mqtt und MqttNachricht zum append..
 _Mqtt_Topic_Liste = []
+# wird von MqttTemperatur genutzt:
+_Status_Helligkeit = []
+_Shelly_SY = []
+# globales logging
 logger = []
+# mqtt client (MqttNachricht: zum subscribe, Shelly: zum publish)
 client = []
 
 if __name__ == '__main__':
