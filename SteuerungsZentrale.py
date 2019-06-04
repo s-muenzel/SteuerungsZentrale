@@ -86,7 +86,7 @@ class MqttNachricht:
 class MqttTemperatur(MqttNachricht):
     """MqttTemperatur
     Ist eine Spezialisierung von MqttNachricht.
-    In der Update-Methode wird geprueft, ob der Rollo zu bewegen ist
+    In der Update-Methode wird geprueft, ob der Rollo zu bewegen ist.
     """
 
     def Update(self, p, n):
@@ -106,7 +106,7 @@ class MqttTemperatur(MqttNachricht):
                 logger.info("Temperaturschwelle erreicht")
                 zeit = time.localtime()
                 stunde = zeit.tm_hour
-                if (stunde < 11) or (stunde > 21):
+                if (stunde < 11) or (stunde > 20):
                     logger.info("Ausserhalb der Uhrzeiten")
                     return
                 if not _Status_Helligkeit.Gueltig():
@@ -117,10 +117,40 @@ class MqttTemperatur(MqttNachricht):
                     return
                 if _Shelly_SZ.Bereit_Oben():
                     logger.info("Alle Bedingungen passen, fahre Rollo runter")
-                    _Shelly_SZ.Fahre80()
+                    _Shelly_SZ.Fahre_Weitgehend_Zu()
                 else:
                     logger.info("Shelly nicht bereit")
 
+class MqttHelligkeit(MqttNachricht):
+    """MqttHelligkeit
+    Ist eine Spezialisierung von MqttNachricht.
+    In der Update-Methode wird geprueft, ob der Rollo zu bewegen ist
+    """
+
+    def Update(self, p, n):
+        """MqttHelligkeit.Update
+        Hier wird geprueft, ob die Bedingungen erfuellt sind, den Rollo runterzufahren.
+        - Sind alle anderen benoetigten Werte da und aktuell?
+        - Daemmert es, d.h. die Helligkeit ist ueber einer Schwelle und unter einer anderen
+        - Ist es frueh am Tag (runterfahren, wenn das Fenster nachts auf war)
+        - Sind die Rollo-Schalter auf "aus" (sonst keine Automatik)
+        - Der Rollo laeuft nicht
+        - Der Rollo ist oben (Position 0)
+        """
+        # Erster Schritt: Basis-Klasse aufrufen
+        if MqttNachricht.Update(self,p,n):
+            if (int(self.Wert()) > 50) and (int(self.Wert() < 500)):
+                logger.info("Helligkeitsbereich erreicht")
+                zeit = time.localtime()
+                stunde = zeit.tm_hour
+                if (stunde < 3) or (stunde > 6):
+                    logger.info("Ausserhalb der Uhrzeiten")
+                    return
+                if _Shelly_SZ.Bereit_Oben():
+                    logger.info("Alle Bedingungen passen, fahre Rollo runter")
+                    _Shelly_SZ.Fahre_Zu()
+                else:
+                    logger.info("Shelly nicht bereit")
 
 class Shelly:
     """Shelly
@@ -174,23 +204,30 @@ class Shelly:
         if not self.Rollo_Pos.Gueltig():
             logger.warning("{name:s} Rollo_Pos kein aktueller Wert".format(name=self.Name))
             return False
-#       if self.Rollo_Pos.Wert() != "0":
-        if self.Rollo_Pos.Wert() != "-1":
+        if self.Rollo_Pos.Wert() != "100":
             logger.info("{name:s} Rollo Position nicht oben, Wert: {wert:s}".format(name=self.Name,wert=self.Rollo_Pos.Wert()))
             return False
         # final, alle Tests bestanden, return true :-)
         logger.info("{name:s} Bereit_Oben: True".format(name=self.Name))
         return True
 
-    def Fahre80(self):
-        """Shelly:Fahre80
-        Gibt das Kommando auf 80% zu zu fahren
+    def Fahre_Weitgehend_Zu(self):
+        """Shelly:Fahre_Weitgehend_Zu
+        Gibt das Kommando, den Rollo weitgehend (20% Rest) zu zu fahren
+        """
+        if client.publish(self.Pattern + "/roller/0/command/pos", "40"):
+            logger.info("{name:s}  Rollo wird auf 40% gefahren".format(name=self.Name))
+        else:
+            logger.error("{name:s}  mqtt message failed".format(name=self.Name))
+
+    def Fahre_Zu(self):
+        """Shelly:Fahre_Weitgehend_Zu
+        Gibt das Kommando, den Rollo zu schliessen
         """
         if client.publish(self.Pattern + "/roller/0/command", "close"):
-#        if client.publish(self.Pattern + "/roller/0/command/pos", "80"):
-            logger.info(self.name + " Rollo wird auf 80% gefahren")
+            logger.info("{name:s}   Rollo wird geschlossen".format(name=self.Name))
         else:
-            logger.error(self.name + " mqtt message failed")
+            logger.error("{name:s}   mqtt message failed".format(name=self.Name))
 
 def on_connect(client, userdata, flags, rc):
     logger.info("Connected with result code " + str(rc))
@@ -214,9 +251,10 @@ def main():
     global logger
     logger = logging.getLogger()
 
+#    global _Mqtt_Topic_Liste
     global _Status_Helligkeit
     #<MqttMessage topic="Sensor/WZTuF/EG/WZ//H">34.1</MqttMessage>
-    _Status_Helligkeit = MqttNachricht("Sensor/WZTuF/EG/WZ//H", "Helligkeit")
+    _Status_Helligkeit = MqttHelligkeit("Sensor/WZTuF/EG/WZ//H", "Helligkeit")
     #<MqttMessage topic="Sensor/WZTuF/EG/WZ//T">34.1</MqttMessage>
     _Status_Temperatur = MqttTemperatur("Sensor/WZTuF/EG/WZ//T", "Temp Aussen")
 
@@ -237,7 +275,7 @@ def main():
 _Mqtt_Topic_Liste = []
 # wird von MqttTemperatur genutzt:
 _Status_Helligkeit = []
-_Shelly_SY = []
+_Shelly_SZ = []
 # globales logging
 logger = []
 # mqtt client (MqttNachricht: zum subscribe, Shelly: zum publish)
