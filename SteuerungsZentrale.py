@@ -2,6 +2,7 @@
 # -*- coding: cp1252 -*-
 from __future__ import print_function
 
+import os
 import logging
 import optparse
 
@@ -10,7 +11,7 @@ import paho.mqtt.client as mqtt
 
 # Debug Level: Liste mit Klassennamen, in der Print-Methode wird geprueft, ob der Name in der Liste ist
 # Falls ja: print, falls nein: nix
-Debug_Klasse = [ "MqttNachricht", "MqttTemperatur", "Shelly" ]
+Debug_Klasse = [ "MqttNachricht", "MqttTemperatur", "MqttHelligkeit", "Shelly" ]
 LOGGING_LEVELS = {'critical': logging.CRITICAL,
                   'error': logging.ERROR,
                   'warning': logging.WARNING,
@@ -33,7 +34,11 @@ class MqttNachricht:
         self.Nachricht = [0,"",pattern,name,60]
         global _Mqtt_Topic_Liste
         _Mqtt_Topic_Liste.append(self)
-        self.Print()
+        for i in Debug_Klasse:
+            if i == self.__class__.__name__:
+                logger.debug("MqttNachricht,  {name:16s}, neues Pattern {pattern:s}".format(
+                      name=self.Nachricht[3],
+                      pattern=self.Nachricht[2]))
 
     def Gueltig(self):
         if time.time() - self.Nachricht[0] < self.Nachricht[4]:
@@ -69,19 +74,22 @@ class MqttNachricht:
     def Print(self):
         for i in Debug_Klasse:
             if i == self.__class__.__name__:
-                logger.info("Mqtt: {name:16s} t: {zeit:8s} v: {wert:8s} {gueltig:9s} Pattern {pattern:s}".format(
+                logger.debug("MqttNachricht,  {name:16s}, t: {zeit:8s}0, v: {wert:8s}, {gueltig:3s}".format(
                       name=self.Nachricht[3],
                       zeit=time.strftime("%X",time.localtime(self.Nachricht[0])),
                       wert=self.Nachricht[1],
-                      gueltig="  gueltig" if self.Gueltig() else "ungueltig",
-                      pattern=self.Nachricht[2]))
+                      gueltig=" ok" if self.Gueltig() else "alt"))
                 return
 
     def Subscribe(self):
         if not client.subscribe(self.Nachricht[2]):
-            logger.error("Fehler bei subscribe to {s:s}".format(s=self.Nachricht[2]))
+            logger.error("MqttNachricht,  {name:16s}, Fehler bei subscribe to {s:s}".format(
+                name=self.Nachricht[3],
+                s=self.Nachricht[2]))
         else:
-            logger.info("subscribed to {s:s}".format(s=self.Nachricht[2]))
+            logger.debug("MqttNachricht,  {name:16s}, subscribed to {s:s}".format(
+                name=self.Nachricht[3],
+                s=self.Nachricht[2]))
 
 class MqttTemperatur(MqttNachricht):
     """MqttTemperatur
@@ -103,23 +111,33 @@ class MqttTemperatur(MqttNachricht):
         # Erster Schritt: Basis-Klasse aufrufen
         if MqttNachricht.Update(self,p,n):
             if self.Wert() > 25:
-                logger.info("Temperaturschwelle erreicht")
+                logger.debug("MqttTemperatur, {name:16s}, Temperaturschwelle erreicht".format(
+                    name=self.Nachricht[3]))
                 zeit = time.localtime()
                 stunde = zeit.tm_hour
                 if (stunde < 11) or (stunde > 20):
-                    logger.info("Ausserhalb der Uhrzeiten")
+                    logger.debug("MqttTemperatur, {name:16s}, Ausserhalb der Uhrzeiten {z:8s} ".format(
+                        name=self.Nachricht[3],
+                        z=time.strftime("%X",zeit)))
                     return
                 if not _Status_Helligkeit.Gueltig():
-                    logger.warning("Kein Helligkeitswert")
+                    logger.warning("MqttTemperatur, {name:16s}, Kein Helligkeitswert".format(
+                        name=self.Nachricht[3]))
                     return
                 if (int(_Status_Helligkeit.Wert()) < 3000):
-                    logger.info("Draussen ist dunkel (oder zumindest keine Sonne)")
+                    logger.debug("MqttTemperatur, {name:16s}, zu dunkel h: {hell:s}".format(
+                        name=self.Nachricht[3],
+						hell=_Status_Helligkeit.Wert()))
                     return
                 if _Shelly_SZ.Bereit_Oben():
-                    logger.info("Alle Bedingungen passen, fahre Rollo runter")
+                    logger.debug("MqttTemperatur, {name:16s}, Alle Bedingungen passen - fahre Rollo runter".format(
+                        name=self.Nachricht[3]))
+                    for i in _Mqtt_Topic_Liste:
+                        i.Print()
                     _Shelly_SZ.Fahre_Weitgehend_Zu()
                 else:
-                    logger.info("Shelly nicht bereit")
+                    logger.debug("MqttTemperatur, {name:16s}, Shelly nicht bereit".format(
+                        name=self.Nachricht[3]))
 
 class MqttHelligkeit(MqttNachricht):
     """MqttHelligkeit
@@ -140,17 +158,25 @@ class MqttHelligkeit(MqttNachricht):
         # Erster Schritt: Basis-Klasse aufrufen
         if MqttNachricht.Update(self,p,n):
             if (int(self.Wert()) > 50) and (int(self.Wert() < 500)):
-                logger.info("Helligkeitsbereich erreicht")
+                logger.debug("MqttHelligkeit, {name:16s}, Helligkeitsbereich passt {hell:s}".format(
+                    name=self.Nachricht[3],
+					hell=self.Wert()))
                 zeit = time.localtime()
                 stunde = zeit.tm_hour
                 if (stunde < 3) or (stunde > 6):
-                    logger.info("Ausserhalb der Uhrzeiten")
+                    logger.debug("MqttHelligkeit, {name:16s}, Ausserhalb der Uhrzeiten {zeit:8s}".format(
+                        name=self.Nachricht[3],
+                        zeit=time.strftime("%X",zeit)))
                     return
                 if _Shelly_SZ.Bereit_Oben():
-                    logger.info("Alle Bedingungen passen, fahre Rollo runter")
+                    logger.debug("MqttHelligkeit, {name:16s}, Alle Bedingungen passen - fahre Rollo runter".format(
+                        name=self.Nachricht[3]))
+                    for i in _Mqtt_Topic_Liste:
+                        i.Print()
                     _Shelly_SZ.Fahre_Zu()
                 else:
-                    logger.info("Shelly nicht bereit")
+                    logger.debug("MqttHelligkeit, {name:16s}, Shelly nicht bereit".format(
+                        name=self.Nachricht[3]))
 
 class Shelly:
     """Shelly
@@ -159,22 +185,18 @@ class Shelly:
     def __init__(self,pattern,name):
         self.Name = name
         self.Pattern = pattern
-        self.Schalter_0 = MqttNachricht(pattern + "/input/0", name + "Schalter 0")
-        self.Schalter_1 = MqttNachricht(pattern + "/input/1", name + "Schalter 1")
-        self.Rollo = MqttNachricht(pattern + "/roller/0", name + "Rollo Status")
-        self.Rollo_Pos = MqttNachricht(pattern + "/roller/0/pos", name + "Rollo Position")
+        self.Schalter_0 = MqttNachricht(pattern + "/input/0",      name + "-Schalter 0")
+        self.Schalter_1 = MqttNachricht(pattern + "/input/1",      name + "-Schalter 1")
+        self.Rollo      = MqttNachricht(pattern + "/roller/0",     name + "-Rollo Stat")
+        self.Rollo_Pos  = MqttNachricht(pattern + "/roller/0/pos", name + "-Rollo Pos ")
         self.Print()
 
     def Print(self):
         for i in Debug_Klasse:
             if i == self.__class__.__name__:
-                logger.info("Shelly: {name:16s} Pattern: {wert:8}".format(
+                logger.debug("Shelly,         {name:16s}, Basis-Pattern {wert:s}".format(
                       name=self.Name,
                       wert=self.Pattern))
-                self.Schalter_0.Print()
-                self.Schalter_1.Print()
-                self.Rollo.Print()
-                self.Rollo_Pos.Print()
                 return
 
     def Bereit_Oben(self):
@@ -182,33 +204,32 @@ class Shelly:
         Hier wird geprueft, ob der Shelly aktuelle Werte hat, die Schalter auf 0 stehen und kein Motor laeuft.
         In dem Fall ist 'Automatik-Mode' an.
         """
-        print("Bereit_Oben")
         if not self.Schalter_0.Gueltig():
-            logger.warning("{name:s} Schalter(0) kein aktueller Wert".format(name=self.Name))
+            logger.warning("Shelly,         {name:16s}, Schalter(0) kein aktueller Wert".format(name=self.Name))
             return False
         if self.Schalter_0.Wert() != "0":
-            logger.info("{name:s} Schalter(0) nicht aus, Wert: {wert:s}".format(name=self.Name,wert=self.Schalter_0.Wert()))
+            logger.debug("Shelly,         {name:16s}, Schalter(0) nicht aus, Wert: {wert:s}".format(name=self.Name,wert=self.Schalter_0.Wert()))
             return False
         if not self.Schalter_1.Gueltig():
-            logger.warning("{name:s} Schalter(1) kein aktueller Wert".format(name=self.Name))
+            logger.warning("Shelly,         {name:16s}, Schalter(1) kein aktueller Wert".format(name=self.Name))
             return False
         if self.Schalter_1.Wert() != "0":
-            logger.info("{name:s} Schalter(1) nicht aus, Wert: {wert:s}".format(name=self.Name,wert=self.Schalter_1.Wert()))
+            logger.debug("Shelly,         {name:16s}, Schalter(1) nicht aus, Wert: {wert:s}".format(name=self.Name,wert=self.Schalter_1.Wert()))
             return False
         if not self.Rollo.Gueltig():
-            logger.warning("{name:s} Rollo kein aktueller Wert".format(name=self.Name))
+            logger.warning("Shelly,         {name:16s}, Rollo kein aktueller Wert".format(name=self.Name))
             return False
         if self.Rollo.Wert() != "stop":
-            logger.info("{name:s} Rollo laeuft, Wert: {wert:s}".format(name=self.Name,wert=self.Rollo.Wert()))
+            logger.debug("Shelly,         {name:16s}, Rollo laeuft, Wert: {wert:s}".format(name=self.Name,wert=self.Rollo.Wert()))
             return False
         if not self.Rollo_Pos.Gueltig():
-            logger.warning("{name:s} Rollo_Pos kein aktueller Wert".format(name=self.Name))
+            logger.warning("Shelly,         {name:16s}, Rollo_Pos kein aktueller Wert".format(name=self.Name))
             return False
         if self.Rollo_Pos.Wert() != "100":
-            logger.info("{name:s} Rollo Position nicht oben, Wert: {wert:s}".format(name=self.Name,wert=self.Rollo_Pos.Wert()))
+            logger.debug("Shelly,         {name:16s}, Rollo Position nicht oben, Wert: {wert:s}".format(name=self.Name,wert=self.Rollo_Pos.Wert()))
             return False
         # final, alle Tests bestanden, return true :-)
-        logger.info("{name:s} Bereit_Oben: True".format(name=self.Name))
+        logger.debug("Shelly,         {name:16s}, Bereit_Oben erfolgreich".format(name=self.Name))
         return True
 
     def Fahre_Weitgehend_Zu(self):
@@ -216,21 +237,21 @@ class Shelly:
         Gibt das Kommando, den Rollo weitgehend (20% Rest) zu zu fahren
         """
         if client.publish(self.Pattern + "/roller/0/command/pos", "40"):
-            logger.info("{name:s}  Rollo wird auf 40% gefahren".format(name=self.Name))
+            logger.info(" Shelly,         {name:16s},  Rollo wird auf 40% gefahren".format(name=self.Name))
         else:
-            logger.error("{name:s}  mqtt message failed".format(name=self.Name))
+            logger.error("Shelly,         {name:16s},  mqtt message failed".format(name=self.Name))
 
     def Fahre_Zu(self):
         """Shelly:Fahre_Weitgehend_Zu
         Gibt das Kommando, den Rollo zu schliessen
         """
         if client.publish(self.Pattern + "/roller/0/command", "close"):
-            logger.info("{name:s}   Rollo wird geschlossen".format(name=self.Name))
+            logger.info(" Shelly,         {name:16s},   Rollo wird geschlossen".format(name=self.Name))
         else:
-            logger.error("{name:s}   mqtt message failed".format(name=self.Name))
+            logger.error("Shelly,         {name:16s},   mqtt message failed".format(name=self.Name))
 
 def on_connect(client, userdata, flags, rc):
-    logger.info("Connected with result code " + str(rc))
+    logger.info(" on_connect,                     , Connected with result code " + str(rc))
     for i in _Mqtt_Topic_Liste:
         i.Subscribe()
 
@@ -240,23 +261,26 @@ def on_message(client, userdata, msg):
             break
 
 def main():
+	# missing timezone info when running in docker
+    os.environ['TZ'] = 'Europe/Berlin'
+
     parser = optparse.OptionParser()
     parser.add_option('-l', '--logging-level', help='Logging level')
     parser.add_option('-f', '--logging-file', help='Logging file name')
     (options, args) = parser.parse_args()
     logging_level = LOGGING_LEVELS.get(options.logging_level, logging.NOTSET)
     logging.basicConfig(level=logging_level, filename=options.logging_file,
-                      format='%(asctime)s %(levelname)s: %(message)s',
-                      datefmt='%Y-%m-%d %H:%M:%S')
+                      format='%(levelname)s, %(message)s')
+#                      format='%(asctime)s %(levelname)s: %(message)s',
+#                      datefmt='%Y-%m-%d %H:%M:%S')
     global logger
     logger = logging.getLogger()
 
-#    global _Mqtt_Topic_Liste
     global _Status_Helligkeit
     #<MqttMessage topic="Sensor/WZTuF/EG/WZ//H">34.1</MqttMessage>
-    _Status_Helligkeit = MqttHelligkeit("Sensor/WZTuF/EG/WZ//H", "Helligkeit")
+    _Status_Helligkeit = MqttHelligkeit("Sensor/WZTuF/EG/WZ//H", "Aussen-Hellig")
     #<MqttMessage topic="Sensor/WZTuF/EG/WZ//T">34.1</MqttMessage>
-    _Status_Temperatur = MqttTemperatur("Sensor/WZTuF/EG/WZ//T", "Temp Aussen")
+    _Status_Temperatur = MqttTemperatur("Sensor/WZTuF/EG/WZ//T", "Aussen-Temp   ")
 
     global _Shelly_SZ
     _Shelly_SZ = Shelly("shellies/shellyswitch25-745815", "SZ")

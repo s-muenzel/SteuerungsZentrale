@@ -63,4 +63,15 @@ In der Update-Methode wird geprueft, ob der Rollo zu bewegen ist
 Die Shelly Klasse behandelt ein Shelly 2.5, d.h. kann den Status und die Befehle buendeln
 
 
+### Internas ###
+#### Format der Log-Messages:####
+csv (Komma Separierte Werte)
+Spalte | Inhalt | nur im Docker-Log
+0 | Zeit | x
+1 | Output-Kanal | x
+3 | Log-Level | 
+4 | Klasse | 
+5 | Objekt | 
+6 | Zeit/Wert/Nachricht |
+
 
