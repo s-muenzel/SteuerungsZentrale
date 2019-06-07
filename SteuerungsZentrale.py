@@ -7,6 +7,7 @@ import logging
 import optparse
 import time
 import urllib2
+import threading
 
 import paho.mqtt.client as mqtt
 
@@ -32,69 +33,76 @@ class MqttNachricht:
     """
 
     def __init__(self, pattern, name, timeout):
-#        self.Nachricht = [0,"",pattern,name,timeout]
-        self.Zeitpunkt = 0
-        self.Wert = ""
-        self.Pattern = pattern
-        self.Name = name
-        self.Timeout = timeout
+        self._Zeitpunkt = 0     # Variabel, Zugriff muss Threadsafe sein
+        self._Wert = ""         # Variabel, Zugriff muss Threadsafe sein
+        self._Pattern = pattern # Konstant
+        self.Name = name       # Konstant
+        self.Timeout = timeout # Konstant
+        self.MeinLock = threading.RLock()
         global _Mqtt_Topic_Liste
         _Mqtt_Topic_Liste.append(self)
         for i in Debug_Klasse:
             if i == self.__class__.__name__:
                 logger.debug("MqttNachricht,  {name:16s}, neues Pattern {pattern:s}".format(
                       name=self.Name,
-                      pattern=self.Pattern))
-
-#    def __init__(self, pattern, name):
-#        self.__init__(self, pattern, name, 60)
+                      pattern=self._Pattern))
 
     def Gueltig(self):
-        if time.time() - self.Zeitpunkt < self.Timeout:
+        self.MeinLock.acquire()
+        Z = self._Zeitpunkt
+        self.MeinLock.release()
+        if time.time() - Z < self.Timeout:
             return True
         else:
             return False
 
     def Update(self, p, n):
-        if self.Pattern == p:
-            self.Zeitpunkt = time.time()
-            self.Wert = n
+        if self._Pattern == p:
+            self.MeinLock.acquire()
+            self._Zeitpunkt = time.time()
+            self._Wert = n
+            self.MeinLock.release()
             self.Print()
             return True
         else:
             return False
 
     def Match(self, p):
-        return self.Pattern == p
+        return self._Pattern == p
 
     def Wert(self):
-        return self.Wert
+        self.MeinLock.acquire()
+        W = self._Wert
+        self.MeinLock.release()
+        return W
 
     def Zeit(self):
-        return self.Zeitpunkt
-
-    def SetzeTimeout(self, t):
-        self.Timeout = t
+        self.MeinLock.acquire()
+        T = self._Zeitpunkt
+        self.MeinLock.release()
+        return T
 
     def Print(self):
         for i in Debug_Klasse:
             if i == self.__class__.__name__:
+                self.MeinLock.acquire()
                 logger.debug("MqttNachricht,  {name:16s}, t: {zeit:8s}0, v: {wert:8s}, {gueltig:3s}".format(
                       name=self.Name,
-                      zeit=time.strftime("%X",time.localtime(self.Zeitpunkt)),
-                      wert=self.Wert,
+                      zeit=time.strftime("%X",time.localtime(self._Zeitpunkt)),
+                      wert=self._Wert,
                       gueltig=" ok" if self.Gueltig() else "alt"))
+                self.MeinLock.release()
                 return
 
     def Subscribe(self):
-        if not client.subscribe(self.Pattern):
+        if not client.subscribe(self._Pattern):
             logger.error("MqttNachricht,  {name:16s}, Fehler bei subscribe to {s:s}".format(
                 name=self.Name,
-                s=self.Pattern))
+                s=self._Pattern))
         else:
             logger.debug("MqttNachricht,  {name:16s}, subscribed to {s:s}".format(
                 name=self.Name,
-                s=self.Pattern))
+                s=self._Pattern))
 
 class MqttTemperatur(MqttNachricht):
     """MqttTemperatur
@@ -103,8 +111,8 @@ class MqttTemperatur(MqttNachricht):
     """
 
     def __init__(self,pattern,name):
-        self.LetzteAktivitaet = 0
-        MqttNachricht.__init__(self, pattern, name, 700) # der Sensor schickt normalerweise alle 5 Minuten einen Wert, daher muss er >600 s gueltig bleiben
+        self.LetzteAktivitaet = 0 # Variabel, Zugriff muss Threadsafe sein
+        MqttNachricht.__init__(self, pattern, name, 100) # der Sensor schickt seine Werte schnell hintereinander, daher ist der Timeout recht kurz
 
     def Update(self, p, n):
         """MqttTemperatur.Update
@@ -119,36 +127,39 @@ class MqttTemperatur(MqttNachricht):
         """
         # Erster Schritt: Basis-Klasse aufrufen
         if MqttNachricht.Update(self,p,n):
-            if float(self.Wert) > 25.0:
-                logger.debug("MqttTemperatur, {name:16s}, Temperaturschwelle erreicht".format(
+            self.MeinLock.acquire()
+            T = float(self._Wert)
+            Aktivitaetstimeout = time.time() - self.LetzteAktivitaet
+            self.MeinLock.release()
+            zeit = time.localtime()
+            stunde = zeit.tm_hour
+            # Ist es heiss genug, passt die Zeit und wurde der Shelly in der letzten Stunde nicht verfahren
+            if (T > 27.0) and (stunde > 10) and (stunde < 20) and (Aktivitaetstimeout > 3600):
+                logger.debug("MqttTemperatur, {name:16s}, Temperatur und Zeit passt".format(
                     name=self.Name))
-                zeit = time.localtime()
-                stunde = zeit.tm_hour
-                if (stunde < 11) or (stunde > 20):
-                    logger.debug("MqttTemperatur, {name:16s}, Ausserhalb der Uhrzeiten {z:8s} ".format(
-                        name=self.Name,
-                        z=time.strftime("%X",zeit)))
-                    return
+                ###### HIER MUSS DER WECHSEL IN EINEN NEUEN THREAD ERFOLGEN - BEVOR AUF EINEN ANDEREN MQTT-WERT ZUGEGRIFFEN WIRD
                 if not _Status_Helligkeit.Gueltig():
                     logger.warning("MqttTemperatur, {name:16s}, Kein Helligkeitswert".format(
                         name=self.Name))
                     return
-                if (int(_Status_Helligkeit.Wert()) < 3000):
-                    logger.debug("MqttTemperatur, {name:16s}, zu dunkel h: {hell:s}".format(
+                H = int(_Status_Helligkeit.Wert())
+                if (H < 3000):
+                    logger.debug("MqttTemperatur, {name:16s}, zu dunkel h: {hell:d}".format(
                         name=self.Name,
-                        hell=_Status_Helligkeit.Wert()))
+                        hell=H))
                     return
-                if time.time() - self.LetzteAktivitaet > 3600: # wenn einmal der Shelly verfahren wurde mind. 1 Stunde warten 
-                    if _Shelly_SZ.Bereit_Oben():
-                        logger.debug("MqttTemperatur, {name:16s}, Alle Bedingungen passen - fahre Rollo runter".format(
-                            name=self.Name))
-                        for i in _Mqtt_Topic_Liste:
-                            i.Print()
-                        _Shelly_SZ.Fahre_Weitgehend_Zu()
-                        self.LetzteAktivitaet = time.time()
-                    else:
-                        logger.debug("MqttTemperatur, {name:16s}, Shelly nicht bereit".format(
-                            name=self.Name))
+                if _Shelly_SZ.Bereit_Oben():
+                    logger.debug("MqttTemperatur, {name:16s}, Alle Bedingungen passen - fahre Rollo runter".format(
+                        name=self.Name))
+                    for i in _Mqtt_Topic_Liste:
+                        i.Print()
+                    _Shelly_SZ.Fahre_Weitgehend_Zu()
+                    self.MeinLock.acquire()
+                    self.LetzteAktivitaet = time.time()
+                    self.MeinLock.release()
+                else:
+                    logger.debug("MqttTemperatur, {name:16s}, Shelly nicht bereit".format(
+                        name=self.Name))
 
 class MqttHelligkeit(MqttNachricht):
     """MqttHelligkeit
@@ -158,8 +169,7 @@ class MqttHelligkeit(MqttNachricht):
 
     def __init__(self,pattern,name):
         self.LetzteAktivitaet = 0
-        MqttNachricht.__init__(self, pattern, name, 700) # der Sensor schickt normalerweise alle 5 Minuten einen Wert, daher muss er >600 s gueltig bleiben
-
+        MqttNachricht.__init__(self, pattern, name, 100) # der Sensor schickt seine Werte schnell hintereinander, daher ist der Timeout recht kurz
 
     def Update(self, p, n):
         """MqttHelligkeit.Update
@@ -173,23 +183,26 @@ class MqttHelligkeit(MqttNachricht):
         """
         # Erster Schritt: Basis-Klasse aufrufen
         if MqttNachricht.Update(self,p,n):
-            if ((int(self.Wert) > 50) and (int(self.Wert) < 500)):
-                logger.debug("MqttHelligkeit, {name:16s}, Helligkeitsbereich passt".format(
+            self.MeinLock.acquire()
+            H = int(self._Wert)
+            Aktivitaetstimeout = time.time() - self.LetzteAktivitaet
+            self.MeinLock.release()
+            zeit = time.localtime()
+            stunde = zeit.tm_hour
+            # Ist es hell genug, passt die Zeit und wurde der Shelly in der letzten Stunde nicht verfahren
+            if (H > 50) and (H < 500) and (stunde > 3) and (stunde < 6) and (Aktivitaetstimeout > 3600):
+                logger.debug("MqttHelligkeit, {name:16s}, Helligkeitsbereich und Zeit passt".format(
                     name=self.Name))
-                zeit = time.localtime()
-                stunde = zeit.tm_hour
-                if ((stunde < 3) or (stunde > 6)):
-                    logger.debug("MqttHelligkeit, {name:16s}, Ausserhalb der Uhrzeiten {zeit:8s}".format(
-                        name=self.Name,
-                        zeit=time.strftime("%X",zeit)))
-                    return
+                ###### HIER MUSS DER WECHSEL IN EINEN NEUEN THREAD ERFOLGEN - BEVOR AUF EINEN ANDEREN MQTT-WERT ZUGEGRIFFEN WIRD
                 if _Shelly_SZ.Bereit_Oben():
                     logger.debug("MqttHelligkeit, {name:16s}, Alle Bedingungen passen - fahre Rollo runter".format(
                         name=self.Name))
                     for i in _Mqtt_Topic_Liste:
                         i.Print()
                     _Shelly_SZ.Fahre_Zu()
+                    self.MeinLock.acquire()
                     self.LetzteAktivitaet = time.time()
+                    self.MeinLock.release()
                 else:
                     logger.debug("MqttHelligkeit, {name:16s}, Shelly nicht bereit".format(
                         name=self.Name))
@@ -200,7 +213,7 @@ class Shelly:
     """
     def __init__(self,pattern,name):
         self.Name = name
-        self.Pattern = pattern
+        self._Pattern = pattern
         self.Schalter_0 = MqttNachricht(pattern + "/input/0",      name + "-Schalter 0", 300) # Werte bleiben 5 Minuten gueltig
         self.Schalter_1 = MqttNachricht(pattern + "/input/1",      name + "-Schalter 1", 300)
         self.Rollo      = MqttNachricht(pattern + "/roller/0",     name + "-Rollo Stat", 300)
@@ -212,7 +225,7 @@ class Shelly:
             if i == self.__class__.__name__:
                 logger.debug("Shelly,         {name:16s}, Basis-Pattern {wert:s}".format(
                       name=self.Name,
-                      wert=self.Pattern))
+                      wert=self._Pattern))
                 return
 
     def RequestMqttMessage(self):
@@ -222,7 +235,7 @@ class Shelly:
         In der nächsten Schleife sollten dann gueltige Werte da sein.
         """
         urllib2.urlopen("http://192.168.2.49/settings?mqtt_update_period=1")
-        time.sleep(1)
+        time.sleep(5)
         urllib2.urlopen("http://192.168.2.49/settings?mqtt_update_period=0")
 
     def Bereit_Oben(self):
@@ -267,7 +280,9 @@ class Shelly:
         """Shelly:Fahre_Weitgehend_Zu
         Gibt das Kommando, den Rollo weitgehend (20% Rest) zu zu fahren
         """
-        if client.publish(self.Pattern + "/roller/0/command/pos", "40"):
+        logger.debug("In Fahre_Weitgehend_Zu : tue nix")
+        return
+        if client.publish(self._Pattern + "/roller/0/command/pos", "40"):
             logger.info(" Shelly,         {name:16s},  Rollo wird auf 40% gefahren".format(name=self.Name))
         else:
             logger.error("Shelly,         {name:16s},  mqtt message failed".format(name=self.Name))
@@ -276,7 +291,9 @@ class Shelly:
         """Shelly:Fahre_Weitgehend_Zu
         Gibt das Kommando, den Rollo zu schliessen
         """
-        if client.publish(self.Pattern + "/roller/0/command", "close"):
+        logger.debug("In Fahre_Zu : tue nix")
+        return
+        if client.publish(self._Pattern + "/roller/0/command", "close"):
             logger.info(" Shelly,         {name:16s},   Rollo wird geschlossen".format(name=self.Name))
         else:
             logger.error("Shelly,         {name:16s},   mqtt message failed".format(name=self.Name))
@@ -302,8 +319,7 @@ def main():
     logging_level = LOGGING_LEVELS.get(options.logging_level, logging.NOTSET)
     logging.basicConfig(level=logging_level, filename=options.logging_file,
                       format='%(levelname)s, %(message)s')
-#                      format='%(asctime)s %(levelname)s: %(message)s',
-#                      datefmt='%Y-%m-%d %H:%M:%S')
+
     global logger
     logger = logging.getLogger()
 
