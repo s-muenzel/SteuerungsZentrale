@@ -89,11 +89,11 @@ wird ein Thread gestartet, in dem die anderen Werte geprüft werden. Sollten die
 (insbesondere den weiteren Empfang von mqtt-Nachrichten). Gerade für den Shelly kann das Verschicken der mqtts getriggert werden  (Start + Stop).
 Sollten die Werte nicht nach einer festen Zeit vorliegen, wird ein Fehler protokolliert.
 
-Dazu braucht es anstatt ein "Gueltig" ein "Warte_auf_Gueltig". Die Implementierung ist abhängig von der Quelle, Sensor-Werte müssen (kurz) warten,
+Dazu muss in "Gueltig" ein gültiger Wert kommen. Die Implementierung ist abhängig von der Quelle, Sensor-Werte müssen (kurz) warten,
 Shelly-Werte müssen - falls nicht vor kurzem ein Trigger gesetzt wurde - einen Trigger setzen, und dann auf die Nachricht warten.
 
 ### Internas ###
-#### Format der Log-Messages:####
+#### Format der Log-Messages: ####
 csv (Komma Separierte Werte)
 Spalte | Inhalt | nur im Docker-Log
 0 | Zeit | x
