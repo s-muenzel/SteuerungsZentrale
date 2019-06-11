@@ -4,13 +4,13 @@
 
 Zentrale IOT Steuerung.
 Der erste Teil soll die Rollos tagsüber bei Hitze weitgehend schliessen.
-
+Oder nachts(morgens), wenn es dämmert, den Rollo schliessen.
 
 
 ## Hardware ##
 
 ### Sensor ###
-Es Aussensensor gibt die Werte per MQTT an alle interessierten.
+Ein Aussensensor schickt die Werte per MQTT an alle interessierten.
 Implementierung siehe Projekt Sensor-Basis.
 
 ### Aktoren ###
@@ -44,6 +44,13 @@ Um die Aktualität von MQTT Nachrichten zu speichern
 *import optparse*
 Zur Unterstützung beim entwickeln
 
+#### threading ####
+*import threading*
+Bei MQTT-Nachrichten ist die Reihenfolge der Nachrichten nicht garantiert.
+Aussder soll der Shelly nicht permanent seinen Status schicken, sondern nur auf Bedarf (auf besonderen Wunsch meiner Besten Hälfte).
+Das lässt sich am Besten mit Threads realisieren (wenn noch kein aktueller Wert da ist, einen besorgen. Um beim Warten nicht zu blockieren gibt es 
+je Aktivität einen eigenen Thread.
+
 ### Klassen ###
 
 #### MqttNachricht ####
@@ -51,16 +58,26 @@ Die generelle Klasse fuer Mqtt-Nachrichten.
 Im Konstrutkor bekommt sie einen Namen und ein Pattern
 Sie merkt sich den Wert und wann der Wert gekommen ist, damit kann sie pruefen, ob der Wert ueberhaupt aktuell ist.
 
-Internes Format: Nachricht=["zeit","wert","pattern","name", "timeout"]
-
 Es kann auch ein individueller Timeout gesetzt werden (Sensor schickt nur alle 5 Minuten oder ggfs sogar nur alle Stunde, Shelly alle 30s)
+
+##### MqttSensor #####
+##### MqttShelly #####
+Der Sensor und die Shellys haben unterschiedliche Verhalten bzgl. der MQTT-Nachrichten.
+Beim Sensor kommen die Werte quasi zeitgleich, aber die Reihenfolge ist nicht klar.
+Da reicht es kurz zu warten, bis alle Werte da sind.
+Beim Shelly muss ein MQTT-Timeout gesetzt werden (und rückgesetzt) und dann kommen die Werte erst.
+Dafür haben die beiden Klassen jeweils eine eigene Implementierung von *Gueltig*
 
 #### MqttTemperatur ####
 Ist eine Spezialisierung von MqttNachricht.
-In der Update-Methode wird geprueft, ob der Rollo zu bewegen ist
+In der Update-Methode wird geprüft, ob der Rollo zu bewegen ist
+
+#### MqttHelligkeit ####
+Ist eine Spezialisierung von MqttNachricht.
+In der Update-Methode wird geprüft, ob der Rollo zu bewegen ist
 
 #### Shelly ####
-Die Shelly Klasse behandelt ein Shelly 2.5, d.h. kann den Status und die Befehle buendeln
+Die Shelly Klasse behandelt ein Shelly 2.5, d.h. kann den Status und die Befehle bündeln
 
 
 ### Multi-Threading ###
