@@ -38,7 +38,7 @@ _mqttclient = []
 
 
 
-class MqttNachricht: # pylint: disable=old-style-class
+class MqttNachricht(object):
     """MqttNachricht
     Die generelle Klasse fuer Mqtt-Nachrichten.
     Im Konstrutkor bekommt sie einen Namen, ein Pattern und einen Timeout
@@ -299,7 +299,7 @@ class MqttShelly(MqttNachricht):
             name=self.m_name))
         return False
 
-class Shelly: # pylint: disable=old-style-class
+class Shelly(object):
     """Shelly
     Die Shelly Klasse behandelt ein Shelly 2.5, d.h. kann den Status und die Befehle buendeln
     """
@@ -307,11 +307,11 @@ class Shelly: # pylint: disable=old-style-class
         self.m_name = name
         self.m_pattern = pattern
         self.m_ip = ip_addr
-        # Werte bleiben 5 Minuten gueltig
-        self.m_schalter_0 = MqttShelly(pattern + "/input/0", name + "-Schalter 0", 300, self)
-        self.m_schalter_1 = MqttShelly(pattern + "/input/1", name + "-Schalter 1", 300, self)
-        self.m_rollo = MqttShelly(pattern + "/roller/0", name + "-Rollo Stat", 300, self)
-        self.m_rollo_pos = MqttShelly(pattern + "/roller/0/pos", name + "-Rollo Pos ", 300, self)
+        # Werte bleiben 1 Stunde gueltig
+        self.m_schalter_0 = MqttShelly(pattern + "/input/0", name + "-Schalter 0", 3600, self)
+        self.m_schalter_1 = MqttShelly(pattern + "/input/1", name + "-Schalter 1", 3600, self)
+        self.m_rollo = MqttShelly(pattern + "/roller/0", name + "-Rollo Stat", 3600, self)
+        self.m_rollo_pos = MqttShelly(pattern + "/roller/0/pos", name + "-Rollo Pos ", 3600, self)
         self.print_alles()
 
     def print_alles(self):
@@ -336,7 +336,7 @@ class Shelly: # pylint: disable=old-style-class
         time.sleep(2)
         urllib2.urlopen("http://"+self.m_ip + "/settings?mqtt_update_period=0")
 
-    def automatic_mode_oben(self):
+    def automatic_mode_oben(self): # pylint : disable=too-many-return-statements
         """Shelly:Bereit
         Hier wird geprueft, ob der Shelly aktuelle Werte hat, die Schalter auf 0 stehen
         und kein Motor laeuft. In dem Fall ist 'Automatik-Mode' an.
