@@ -25,17 +25,10 @@ LOGGING_LEVELS = {'critical': logging.CRITICAL,
                   'debug': logging.DEBUG}
 
 # das sind die globalen Variablen..
-# Für die Callbacks von mqtt und MqttNachricht zum append..
-_Mqtt_Topic_Liste = []
 # wird von MqttTemperatur genutzt:
 _Status_Helligkeit = []
 _Status_Temperatur = []
 _Shelly_SZ = []
-# globales logging
-_logger = []
-# mqtt client (MqttNachricht: zum subscribe, Shelly: zum publish)
-_mqttclient = []
-
 
 
 class MqttNachricht(object):
@@ -52,10 +45,10 @@ class MqttNachricht(object):
     def __init__(self, pattern, name, timeout):
         """__init__
         Initialisierung der MqttNachricht-Basisklasse"""
-        self.m_zeitpunkt = 0     # Variabel, Zugriff muss Threadsafe sein
-        self.m_wert = ""         # Variabel, Zugriff muss Threadsafe sein
+        self.m_zeitpunkt = 0 # Variabel, Zugriff muss Threadsafe sein
+        self.m_wert = "" # Variabel, Zugriff muss Threadsafe sein
         self.m_pattern = pattern # Konstant
-        self.m_name = name       # Konstant
+        self.m_name = name # Konstant
         self.m_timeout = timeout # Konstant
         self.m_gueltig_event = threading.Event()
         self.m_lock = threading.RLock()
@@ -132,6 +125,7 @@ class MqttNachricht(object):
                 name=self.m_name,
                 s=self.m_pattern))
 
+
 class MqttSensor(MqttNachricht):
     """Zwischenklasse
     fuer Werte, die von dem Sensor kommen, gibt es eine Default-gueltig-Implementierung"""
@@ -150,6 +144,7 @@ class MqttSensor(MqttNachricht):
             name=self.m_name))
         return False
 
+
 class MqttTemperatur(MqttSensor):
     """MqttTemperatur
     Ist eine Spezialisierung von MqttNachricht.
@@ -159,7 +154,6 @@ class MqttTemperatur(MqttSensor):
     def __init__(self, pattern, name, timeout):
         self.m_aktivitaetstimer = 0 # Variabel, Zugriff muss Threadsafe sein
         # der Sensor schickt seine Werte schnell hintereinander, daher ist der Timeout recht kurz
-#        MqttNachricht.__init__(self, pattern, name, 100)
         MqttSensor.__init__(self, pattern, name, timeout)
 
     def temperatur_check(self):
@@ -193,16 +187,9 @@ class MqttTemperatur(MqttSensor):
             else:
                 _LogSup.log().debug("MqttTemperatur, {name:16s}, Shelly Rollo nicht oben".format(
                     name=self.m_name))
-            for i in _Mqtt_Topic_Liste:
-                i.print_alles()
-            _Shelly_SZ.schliesse_teilweise()
-            self.m_lock.acquire()
-            self.m_aktivitaetstimer = time.time()
-            self.m_lock.release()
         else:
             _LogSup.log().debug("MqttTemperatur, {name:16s}, Shelly nicht im Auto-Mode".format(
                 name=self.m_name))
-
 
     def update(self, pattern, nachricht):
         """MqttTemperatur.update
@@ -233,6 +220,7 @@ class MqttTemperatur(MqttSensor):
                 _LogSup.log().debug("Starte neuen Thread")
                 threading.Thread(target=self.temperatur_check).start()
 
+
 class MqttHelligkeit(MqttSensor):
     """MqttHelligkeit
     Ist eine Spezialisierung von MqttNachricht.
@@ -242,7 +230,6 @@ class MqttHelligkeit(MqttSensor):
     def __init__(self, pattern, name, timeout):
         self.m_aktivitaetstimer = 0
         # der Sensor schickt seine Werte schnell hintereinander, daher ist der Timeout recht kurz
-#        MqttNachricht.__init__(self, pattern, name, 100)
         MqttSensor.__init__(self, pattern, name, timeout)
 
     def helligkeit_check(self):
@@ -265,12 +252,6 @@ class MqttHelligkeit(MqttSensor):
             else:
                 _LogSup.log().debug("MqttHelligkeit, {name:16s}, Shelly Rollo nicht oben".format(
                     name=self.m_name))
-            for i in _Mqtt_Topic_Liste:
-                i.print_alles()
-            _Shelly_SZ.schliesse_komplett()
-            self.m_lock.acquire()
-            self.m_aktivitaetstimer = time.time()
-            self.m_lock.release()
         else:
             _LogSup.log().debug("MqttHelligkeit, {name:16s}, Shelly nicht im Auto-Modus".format(
                 name=self.m_name))
@@ -331,6 +312,7 @@ class MqttShelly(MqttNachricht):
             "MqttShelly, {name:16s}, Immer noch kein gueltiger Wert".format(
                 name=self.m_name))
         return False
+
 
 class Shelly(object):
     """Shelly
@@ -474,6 +456,7 @@ class Shelly(object):
             "Shelly, {name:16s}, Rollo ist oben".format(name=self.m_name))
         return True
 
+
     def schliesse_teilweise(self):
         """Shelly:schliesse_teilweise
         Gibt das Kommando, den Rollo weitgehend (20% Rest) zu zu fahren
@@ -604,24 +587,11 @@ def main():
     # missing timezone info when running in docker
     os.environ['TZ'] = 'Europe/Berlin'
 
-    parser = optparse.OptionParser()
-    parser.add_option('-l', '--logging-level', help='Logging level')
-    parser.add_option('-f', '--logging-file', help='Logging file name')
-    (options, args) = parser.parse_args()
-    del args # wird nicht benutzt
-    logging_level = LOGGING_LEVELS.get(options.logging_level, logging.NOTSET)
-    logging.basicConfig(level=logging_level, filename=options.logging_file,
-                        format='%(levelname)s, [%(threadName)s], %(message)s')
-
-    global _logger # pylint: disable=global-statement
-    _logger = logging.getLogger()
-
     global _Status_Helligkeit # pylint: disable=global-statement
-    #<MqttMessage topic="Sensor/WZTuF/EG/WZ//H">34.1</MqttMessage>
     _Status_Helligkeit = MqttHelligkeit("Sensor/WZTuF/EG/WZ//H", "Aussen-Hellig", 100)
+
     global _Status_Temperatur # pylint: disable=global-statement
-    #<MqttMessage topic="Sensor/WZTuF/EG/WZ//T">34.1</MqttMessage>
-    _Status_Temperatur = MqttTemperatur("Sensor/WZTuF/EG/WZ//T", "Aussen-Temp   ", 100)
+    _Status_Temperatur = MqttTemperatur("Sensor/WZTuF/EG/WZ//T", "Aussen-Temp", 100)
 
     global _Shelly_SZ # pylint: disable=global-statement
     _Shelly_SZ = Shelly("shellies/shellyswitch25-745815", "SZ", "192.168.2.49")
