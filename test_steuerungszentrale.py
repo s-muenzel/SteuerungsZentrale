@@ -8,7 +8,7 @@ import unittest
 
 from steuerungszentrale import MqttNachricht 
 from steuerungszentrale import Shelly 
-from steuerungszentrale import mqtt_sup 
+from steuerungszentrale import MqttSup 
 
 
 #import os
@@ -48,9 +48,9 @@ class TestMqttNachricht(unittest.TestCase):
         # jetzt Wert gesetzt --> wert "nachricht"
         self.assertEqual(mqtt_nachricht.wert(), "nachricht_wert", msg="wert: gesetzter Wert nicht richtig")
         mqtt_nachricht2 = MqttNachricht("test2", "testnachricht2", 10)
-        mqtt_sup.loop_start()
+        MqttSup.loop_start()
         time.sleep(1) # warte, dass die Loop ans Laufen kommt
-        self.assertTrue(mqtt_sup.publish("test2", "1234"))
+        self.assertTrue(MqttSup.publish("test2", "1234"))
         for i in range(3):
             del i
             time.sleep(1)
@@ -59,7 +59,7 @@ class TestMqttNachricht(unittest.TestCase):
                 break
         self.assertTrue(ist_gueltig, msg="wert: keinen gueltigen Wert empfangen")
         self.assertEqual(mqtt_nachricht2.wert(), "1234", msg="wert: gesetzter Wert nicht richtig")
-        mqtt_sup.loop_stop()
+        MqttSup.loop_stop()
 
     def test_zeit(self):
         """test methode zeit"""
@@ -85,10 +85,10 @@ class TestShelly(unittest.TestCase):
         del cls._mein_shelly_gut
 
     def setUp(self):
-        mqtt_sup.loop_start()
+        MqttSup.loop_start()
 
     def tearDown(self):
-        mqtt_sup.loop_stop()
+        MqttSup.loop_stop()
 
     def test_automatic_mode_oben(self):
         """test methode Shelly:automatic_mode_oben"""
