@@ -12,6 +12,7 @@ import optparse
 import time
 import urllib2
 import threading
+import Queue
 
 import paho.mqtt.client as mqtt
 
@@ -24,11 +25,242 @@ LOGGING_LEVELS = {'critical': logging.CRITICAL,
                   'info': logging.INFO,
                   'debug': logging.DEBUG}
 
-# das sind die globalen Variablen..
-# wird von MqttTemperatur genutzt:
-_Status_Helligkeit = []
-_Status_Temperatur = []
-_Shelly_SZ = []
+class AktivitaetsQueue(object):
+    """AktivitaetsQueue
+    Singleton-Klasse: startet und verwaltet eine (einzige) Queue"""
+    _thread = None
+    _queue = None
+    _weiter = False
+
+    @classmethod
+    def _mqtt_exit(cls):
+        _LogSup.log().debug("AktivitaetsQueue, exite Thread")
+        if not cls._thread is None:
+            _LogSup.log().debug("...")
+            del cls._queue
+            cls._queue = None
+            cls._thread.join()
+            del cls._thread
+            cls._thread = None
+        cls._weiter = False
+
+    @classmethod
+    def _queue_worker(cls):
+        while cls._weiter:
+            try:
+                item = cls._queue.get(block=True, timeout=5)
+                item.trigger_intern()
+                cls._queue.task_done()
+            except Queue.Empty:
+                pass
+        _LogSup.log().warning("AktivitaetsQueue, Queue angehalten")
+        cls._mqtt_exit()
+
+    @classmethod
+    def start_queue(cls):
+        _LogSup.log().debug("AktivitaetsQueue, starte Queue")
+        if cls._thread is None:
+            cls._weiter = True
+            cls._queue = Queue.Queue()
+            cls._thread = threading.Thread(target=cls._queue_worker)
+            cls._thread.start()
+
+    @classmethod
+    def stop_queue(cls):
+        _LogSup.log().debug("AktivitaetsQueue, stoppe Queue")
+        cls._weiter = False
+
+    @classmethod
+    def put(cls, msg):
+        _LogSup.log().debug("AktivitaetsQueue, neue Nachricht")
+        cls._queue.put(msg)
+
+
+class Aktivitaet(object):
+    """Aktivitaet
+    Mqtt-Nachrichten werden von allen Aktivitaeten (Aktivitaet-Objekte) geprueft, ob ggfs.
+    etwas zu tun waere. Falls ja, schiebt die Aktivitaet sich eine Nachricht in die Queue
+    und arbeitet sie in den Aktivitaets-Thread ab.
+    Dadurch werden die Aktivitaeten auf jeden Fall serialisiert und kommen sich nicht
+    in die Quere.
+
+    Als erste Version bekommt jede "Art" von Aktivitaet eine eigene abgeleitete Klasse.
+    In dieser Klasse werden die eigentlichen Bedingungen und Aktionen hinterlegt.
+    TODO: Umstellen auf ein mehr Parametrisiertes Vorgehen (neue Aktivitaet durch
+    Konfiguration anstatt Programmierung)
+    """
+
+    def __init__(self):
+        AktivitaetsQueue.start_queue()
+        self.m_lock = threading.RLock()
+        _LogSup.log().debug("Aktivitaet,  {name:16s}, __init__".format(
+            name=self))
+
+
+    def trigger(self):
+        """Aktivitaet:trigger
+        Prueft, ob ggfs. etwas zu tun waere - Notwendige Bedingungen.
+        Darf nur schnell pruefen und nicht blockieren.
+        Falls der notwendige Check positiv ist, stellt trigger eine Nachricht
+        in die Queue. In einem Worker-Thread wird dann der 2. Teil gemacht.
+        Siehe trigger_intern"""
+        AktivitaetsQueue.put(self)
+
+    def trigger_intern(self):
+        """Aktivitaet:trigger_intern
+        Im 2. Teil werden die notwendigen Bedingungen geprueft.
+        Falls diese positiv sind, wird die Aktivitaet aufgerufen"""
+        _LogSup.log().debug("Aktivitaet,  {name:16s}, trigger_intern".format(
+            name=self))
+
+
+class AktivitaetSchattenbeiHitze(Aktivitaet):
+    """AktivitaetSchattenbeiHitze
+    Bedingungen:
+    Notwendig:
+        Zeit:  10:00 - 19:59
+        Temperatur: > 27.0
+        keine Aktivitaet seit: 3600s
+    Hinreichend:
+        Helligkeit: >= 3000
+        Shelly in Automatic-Mode
+        Rollo oben
+    """
+
+    def __init__(self, name, temp_sensor, hell_sensor, shelly):
+        Aktivitaet.__init__(self)
+        self.m_name = name
+        self.m_temp_sensor = temp_sensor
+        self.m_hell_sensor = hell_sensor
+        self.m_shelly = shelly
+        self.m_aktivitaetstimer = 0 # Zugriff muss Threadsafe sein
+
+    def trigger(self):
+        """AktivitaetSchattenbeiHitze:trigger
+        Pruefen der notwendigen Bedingungen (1. Schritt):
+        Ist es heiss genug, passt die Zeit und wurde Shelly eine Stunde nicht verfahren?
+
+        Noch im Main-Thread"""
+        zeit = time.localtime()
+        stunde = zeit.tm_hour
+        if (stunde > 9) and (stunde < 20):
+            self.m_lock.acquire()
+            aktiv_timeout = time.time() - self.m_aktivitaetstimer
+            self.m_lock.release()
+            if aktiv_timeout > 3600:
+                if self.m_temp_sensor.gueltig():
+                    temperatur = float(self.m_temp_sensor.wert())
+                    if temperatur > 27.0:
+                        _LogSup.log().debug(
+                            "A_SchattenbeiHitze, {n:16s}, T und Zeit passt".format(
+                                n=self.m_name))
+                        Aktivitaet.trigger(self)
+
+    def trigger_intern(self):
+        """AktivitaetSchattenbeiHitze:trigger_intern
+        Pruefen der hinreichenden Bedingungen (2. Schritt)
+        Ist es hell genug, ist der Shelly im Auto-Mode und ist der Rollo oben?
+        Falls ja: Fahre Rollo teilweise zu.
+
+        Jetzt im Aktivitaets-Thread"""
+        if not self.m_hell_sensor.gueltig():
+            _LogSup.log().warning("A_SchattenbeiHitze, {n:16s}, Keine Helligkeit".format(
+                n=self.m_name))
+            return
+        helligkeit = int(self.m_hell_sensor.wert())
+        if helligkeit < 3000:
+            _LogSup.log().debug("A_SchattenbeiHitze, {n:16s}, zu dunkel h: {h:d}".format(
+                n=self.m_name,
+                h=helligkeit))
+            return
+        if self.m_shelly.automatic_mode():
+            if self.m_shelly.position_oben():
+                _LogSup.log().info(
+                    "A_SchattenbeiHitze, {n:16s}, fahre auf 40% um {z:8s} T={t:f} H={h:d}".format(
+                        n=self.m_name,
+                        z=time.strftime("%X"),
+                        t=float(self.m_temp_sensor.wert()),
+                        h=helligkeit))
+                self.m_shelly.schliesse_teilweise()
+                self.m_lock.acquire()
+                self.m_aktivitaetstimer = time.time()
+                self.m_lock.release()
+            else:
+                _LogSup.log().debug(
+                    "A_SchattenbeiHitze, {name:16s}, Shelly Rollo nicht oben".format(
+                        name=self.m_name))
+        else:
+            _LogSup.log().debug(
+                "A_SchattenbeiHitze, {name:16s}, Shelly nicht im Auto-Mode".format(
+                    name=self.m_name))
+
+
+class AktivitaetNachtsRolloSchliessen(Aktivitaet):
+    """AktivitaetNachtsRolloSchliessen
+    Bedingungen:
+    Notwendig:
+        Zeit:  4:00 - 5:59
+        Helligkeit: 51 - 999
+        keine Aktivitaet seit: 3600s
+    Hinreichend:
+        Shelly in Automatic-Mode
+        Rollo oben
+    """
+
+    def __init__(self, name, hell_sensor, shelly):
+        Aktivitaet.__init__(self)
+        self.m_name = name
+        self.m_hell_sensor = hell_sensor
+        self.m_shelly = shelly
+        self.m_aktivitaetstimer = 0 # Zugriff muss Threadsafe sein
+
+    def trigger(self):
+        """AktivitaetNachtsRolloSchliessen:trigger
+        Pruefen der notwendigen Bedingungen (1. Schritt):
+        Ist es heiss genug, passt die Zeit und wurde Shelly eine Stunde nicht verfahren?
+
+        Noch im Main-Thread"""
+        zeit = time.localtime()
+        stunde = zeit.tm_hour
+        if (stunde > 3) and (stunde < 6):
+            self.m_lock.acquire()
+            aktiv_timeout = time.time() - self.m_aktivitaetstimer
+            self.m_lock.release()
+            if aktiv_timeout > 3600:
+                if self.m_hell_sensor.gueltig():
+                    helligkeit = int(self.m_hell_sensor.wert())
+                    if (helligkeit > 50) and (helligkeit < 1000):
+                        _LogSup.log().debug(
+                            "A_NachtsRolloSchliessen, {n:16s}, Helligkeit und Zeit passt".format(
+                                n=self.m_name))
+                        Aktivitaet.trigger(self)
+
+    def trigger_intern(self):
+        """AktivitaetNachtsRolloSchliessen:trigger_intern
+        Pruefen der hinreichenden Bedingungen (2. Schritt)
+        Ist es hell genug, ist der Shelly im Auto-Mode und ist der Rollo oben?
+        Falls ja: Fahre Rollo teilweise zu.
+
+        Jetzt im Aktivitaets-Thread"""
+        if self.m_shelly.automatic_mode():
+            if self.m_shelly.position_oben():
+                _LogSup.log().info(
+                    "A_NachtsRolloSchliessen, {n:16s}, schliesse Rollo um {z:8s} H={h:d}".format(
+                        n=self.m_name,
+                        z=time.strftime("%X"),
+                        h=int(self.m_hell_sensor.wert())))
+                self.m_shelly.schliesse_teilweise()
+                self.m_lock.acquire()
+                self.m_aktivitaetstimer = time.time()
+                self.m_lock.release()
+            else:
+                _LogSup.log().debug(
+                    "A_NachtsRolloSchliessen, {n:16s}, Shelly Rollo nicht oben".format(
+                        n=self.m_name))
+        else:
+            _LogSup.log().debug(
+                "A_NachtsRolloSchliessen, {n:16s}, Shelly nicht im Auto-Mode".format(
+                    n=self.m_name))
 
 
 class MqttNachricht(object):
@@ -40,7 +272,11 @@ class MqttNachricht(object):
     Nach "Timeout" wird der Wert als ungueltig gewertet.
     Da die Quellen fuer die Nachrichten unterschiedlich sind, sollten abgeleitete Klassen eigene
     "gueltig" Implementierungen haben.
+
+    MqttNachricht kann mit Aktivitaeten angereichert werden.
+    Wenn eine passende Nachricht kommt, werden die Aktivitaeten getriggert
     """
+    # pylint: disable=too-many-instance-attributes
 
     def __init__(self, pattern, name, timeout):
         """__init__
@@ -52,12 +288,18 @@ class MqttNachricht(object):
         self.m_timeout = timeout # Konstant
         self.m_gueltig_event = threading.Event()
         self.m_lock = threading.RLock()
+        self.m_aktivitaeten = []
         MqttSup.register(self)
         for i in DEBUG_KLASSE:
             if i == self.__class__.__name__:
-                _LogSup.log().debug("MqttNachricht,  {name:16s}, neues Pattern {pattern:s}".format(
+                _LogSup.log().debug("MqttNachricht,  {name:16s}, Pattern {pattern:s}".format(
                     name=self.m_name,
                     pattern=self.m_pattern))
+
+    def plus_aktivitaet(self, aktivitaet):
+        """plus_aktivitaet
+        Haengt eine (weiter) aktivitaet in die interne Liste ein"""
+        self.m_aktivitaeten.append(aktivitaet)
 
     def gueltig(self):
         """gueltig
@@ -74,12 +316,17 @@ class MqttNachricht(object):
         """update
         Basis-Implementierung: Wenn das Pattern passt, merke den neuen Wert und die Zeit"""
         if self.m_pattern == pattern:
+            _LogSup.log().debug("MqttNachricht, update {n:16s}, {w:s}".format(
+                n=self.m_name,
+                w=nachricht))
             self.m_lock.acquire()
             self.m_zeitpunkt = time.time()
             self.m_wert = nachricht
             self.m_lock.release()
             self.m_gueltig_event.set()
             self.print_alles()
+            for i in self.m_aktivitaeten:
+                i.trigger()
             return True
         return False
 
@@ -129,9 +376,12 @@ class MqttNachricht(object):
 class MqttSensor(MqttNachricht):
     """Zwischenklasse
     fuer Werte, die von dem Sensor kommen, gibt es eine Default-gueltig-Implementierung"""
+
     def gueltig(self):
         if MqttNachricht.gueltig(self):
             return True
+        if not MqttSup.darf_warten():
+            return False # im Mainthread nicht warten !
         _LogSup.log().debug(
             "MqttSensor, {name:16s}, Noch kein gueltiger Wert, warte auf einen".format(
                 name=self.m_name))
@@ -144,156 +394,13 @@ class MqttSensor(MqttNachricht):
             name=self.m_name))
         return False
 
-
-class MqttTemperatur(MqttSensor):
-    """MqttTemperatur
-    Ist eine Spezialisierung von MqttNachricht.
-    In der update-Methode wird geprueft, ob der Rollo zu bewegen ist.
-    """
-
-    def __init__(self, pattern, name, timeout):
-        self.m_aktivitaetstimer = 0 # Variabel, Zugriff muss Threadsafe sein
-        # der Sensor schickt seine Werte schnell hintereinander, daher ist der Timeout recht kurz
-        MqttSensor.__init__(self, pattern, name, timeout)
-
-    def temperatur_check(self):
-        """erster Schritt: die Funktion wird in einem eigenen Thread gestartet"""
-        _LogSup.log().debug("In neuem Thread")
-        if not _Status_Helligkeit.gueltig():
-            _LogSup.log().warning("MqttTemperatur, {name:16s}, Kein Helligkeitswert".format(
-                name=self.m_name))
-            return
-        helligkeit = int(_Status_Helligkeit.wert())
-        if helligkeit < 3000:
-            _LogSup.log().debug("MqttTemperatur, {name:16s}, zu dunkel h: {hell:d}".format(
-                name=self.m_name,
-                hell=helligkeit))
-            return
-        if _Shelly_SZ.automatic_mode():
-            if _Shelly_SZ.position_oben():
-#                _LogSup.log().debug(
-#"MqttTemperatur, {name:16s}, Alle Bedingungen passen - fahre Rollo runter".format(
-#                        name=self.m_name))
-                _LogSup.log().info(
-                    "MqttTemperatur, {n:16s}, fahre auf 40% um {z:8s} T={t:f} H={h:d}".format(
-                        n=self.m_name,
-                        z=time.strftime("%X"),
-                        t=float(self.m_wert),
-                        h=helligkeit))
-                _Shelly_SZ.schliesse_teilweise()
-                self.m_lock.acquire()
-                self.m_aktivitaetstimer = time.time()
-                self.m_lock.release()
-            else:
-                _LogSup.log().debug("MqttTemperatur, {name:16s}, Shelly Rollo nicht oben".format(
-                    name=self.m_name))
-        else:
-            _LogSup.log().debug("MqttTemperatur, {name:16s}, Shelly nicht im Auto-Mode".format(
-                name=self.m_name))
-
-    def update(self, pattern, nachricht):
-        """MqttTemperatur.update
-        Hier wird geprueft, ob die Bedingungen erfuellt sind, den Rollo runterzufahren.
-        - Sind alle anderen benoetigten Werte da und aktuell?
-        - Ist die Temperatur ueber der Hitze-Schwelle
-        - Ist es ueberhaupt Tag (runterfahren auf der Westseite erst ab 11:00 Uhr bis max 21:00 Uhr)
-        - Ist es hell (scheint die Sonne?)
-        - Sind die Rollo-Schalter auf "aus" (sonst keine Automatik)
-        - Der Rollo laeuft nicht
-        - Der Rollo ist oben (Position 0)
-        """
-        # Erster Schritt: Basis-Klasse aufrufen
-        if MqttNachricht.update(self, pattern, nachricht):
-            self.m_lock.acquire()
-            temperatur = float(self.m_wert)
-            aktiv_timeout = time.time() - self.m_aktivitaetstimer
-            self.m_lock.release()
-            zeit = time.localtime()
-            stunde = zeit.tm_hour
-#            _LogSup.log().debug(
-#                "MqttTemperatur, {name:16s}, T: {t:f} stunde: {s:d} L_A: {a:f}".format(
-#                name=self.m_name, t=temperatur, s=stunde, a=aktiv_timeout))
-            # Ist es heiss genug, passt die Zeit und wurde Shelly eine Stunde nicht verfahren
-            if (temperatur > 27.0) and (stunde > 10) and (stunde < 20) and (aktiv_timeout > 3600):
-                _LogSup.log().debug("MqttTemperatur, {name:16s}, Temperatur und Zeit passt".format(
-                    name=self.m_name))
-                _LogSup.log().debug("Starte neuen Thread")
-                threading.Thread(target=self.temperatur_check).start()
-
-
-class MqttHelligkeit(MqttSensor):
-    """MqttHelligkeit
-    Ist eine Spezialisierung von MqttNachricht.
-    In der update-Methode wird geprueft, ob der Rollo zu bewegen ist
-    """
-
-    def __init__(self, pattern, name, timeout):
-        self.m_aktivitaetstimer = 0
-        # der Sensor schickt seine Werte schnell hintereinander, daher ist der Timeout recht kurz
-        MqttSensor.__init__(self, pattern, name, timeout)
-
-    def helligkeit_check(self):
-        """erster Schritt: die Funktion wird in einem eigenen Thread gestartet"""
-        _LogSup.log().debug("In neuem Thread")
-        if _Shelly_SZ.automatic_mode():
-            if _Shelly_SZ.position_oben():
-#                _LogSup.log().debug(
-#"MqttHelligkeit, {name:16s}, Alle Bedingungen passen - fahre Rollo runter".format(
-#                        name=self.m_name))
-                _LogSup.log().info(
-                    "MqttHelligkeit, {n:16s}, schliesse Rollo um {z:8s} H={h:d}".format(
-                        n=self.m_name,
-                        z=time.strftime("%X"),
-                        h=int(self.m_wert)))
-                _Shelly_SZ.schliesse_komplett()
-                self.m_lock.acquire()
-                self.m_aktivitaetstimer = time.time()
-                self.m_lock.release()
-            else:
-                _LogSup.log().debug("MqttHelligkeit, {name:16s}, Shelly Rollo nicht oben".format(
-                    name=self.m_name))
-        else:
-            _LogSup.log().debug("MqttHelligkeit, {name:16s}, Shelly nicht im Auto-Modus".format(
-                name=self.m_name))
-
-    def update(self, pattern, nachricht):
-        """MqttHelligkeit.update
-        Hier wird geprueft, ob die Bedingungen erfuellt sind, den Rollo runterzufahren.
-        - Sind alle anderen benoetigten Werte da und aktuell?
-        - Daemmert es, d.h. die Helligkeit ist ueber einer Schwelle und unter einer anderen
-        - Ist es frueh am Tag (runterfahren, wenn das Fenster nachts auf war)
-        - Sind die Rollo-Schalter auf "aus" (sonst keine Automatik)
-        - Der Rollo laeuft nicht
-        - Der Rollo ist oben (Position 0)
-        """
-        # Erster Schritt: Basis-Klasse aufrufen
-        if MqttNachricht.update(self, pattern, nachricht):
-            self.m_lock.acquire()
-            helligkeit = int(self.m_wert)
-            aktiv_timeout = time.time() - self.m_aktivitaetstimer
-            self.m_lock.release()
-            zeit = time.localtime()
-            stunde = zeit.tm_hour
-#            _LogSup.log().debug(
-#                "MqttHelligkeit, {name:16s}, H: {h:d} stunde: {s:d} L_A: {a:f}".format(
-#                name=self.m_name, h=helligkeit, s=stunde, a=aktiv_timeout))
-            # Ist es hell genug, passt die Zeit und wurde Shelly eine Stunde nicht verfahren
-            if ((helligkeit > 50) and (helligkeit < 500) and (stunde > 3) and (stunde < 6) and
-                    (aktiv_timeout > 3600)):
-                _LogSup.log().debug(
-                    "MqttHelligkeit, {n:16s}, Helligkeitsbereich und Zeit passt".format(
-                        n=self.m_name))
-                _LogSup.log().debug("Starte neuen Thread")
-                threading.Thread(target=self.helligkeit_check).start()
-
-
 class MqttShelly(MqttNachricht):
     """Zwischenklasse:
     fuer Werte, die von einem Shelly kommen, gibt es eine Default-gueltig-Implementierung"""
+
     def __init__(self, pattern, name, timeout, shelly):
         self.m_shelly = shelly
         MqttNachricht.__init__(self, pattern, name, timeout)
-
 
     def gueltig(self):
         if MqttNachricht.gueltig(self):
@@ -302,6 +409,8 @@ class MqttShelly(MqttNachricht):
             "MqttShelly, {name:16s}, Noch kein gueltiger Wert, fordere neuen an".format(
                 name=self.m_name))
         self.m_shelly.trigger_mqtt()
+        if not MqttSup.darf_warten():
+            return False # im Mainthread nicht warten !
         self.m_gueltig_event.wait(5) # sollte noch kein Wert da sein, max. 5 Sekunden warten
         if MqttNachricht.gueltig(self):
             _LogSup.log().debug(
@@ -365,7 +474,7 @@ class Shelly(object):
             _LogSup.log().error(
                 "Shelly, {name:16s}, trigger_mqtt 1 URLError".format(name=self.m_name))
             _LogSup.log().error(fehler)
-#        else:
+        ###        else: ### sicherer ist das...
         for i in range(3):
             del i
             time.sleep(2)
@@ -446,10 +555,11 @@ class Shelly(object):
                 "Shelly, {name:16s}, Rollo_Pos kein aktueller Wert".format(
                     name=self.m_name))
             return False
-        if self.m_rollo_pos.wert() != "100":
+        rollo_pos = int(self.m_rollo_pos.wert())
+        if rollo_pos < 96:
             _LogSup.log().debug(
-                "Shelly, {name:16s}, Rollo Position nicht oben, Wert: {wert:s}".format(
-                    name=self.m_name, wert=self.m_rollo_pos.wert()))
+                "Shelly, {name:16s}, Rollo Position nicht oben, Wert: {wert:d}".format(
+                    name=self.m_name, wert=rollo_pos))
             return False
         # final, alle Tests bestanden, return true :-)
         _LogSup.log().debug(
@@ -472,12 +582,15 @@ class Shelly(object):
         """Shelly:schliesse_komplett
         Gibt das Kommando, den Rollo zu schliessen
         """
-        if MqttSup.publish(self.m_pattern + "/roller/0/command", "close"):
+        ###        if MqttSup.publish(self.m_pattern + "/roller/0/command", "close"):
+        ### mit pos-Kommando klappt es...
+        if MqttSup.publish(self.m_pattern + "/roller/0/command/pos", "0"):
             _LogSup.log().info(
                 " Shelly, {name:16s}, Rollo wird geschlossen".format(name=self.m_name))
         else:
             _LogSup.log().error(
                 "Shelly,{name:16s}, mqtt message failed".format(name=self.m_name))
+
 
 def on_connect(client, userdata, flags, result):
     """on_connect
@@ -493,10 +606,12 @@ def on_message(client, userdata, msg):
     del client, userdata # nicht benuetzt
     MqttSup.update(msg.topic, msg.payload)
 
+
 class MqttSup(object):
     """Singleton-Klasse fuer den MQTT-Support"""
     _mqttclient = None
     _consumer = []
+    _loop_thread = None
 
     @classmethod
     def _mqtt_init(cls):
@@ -512,19 +627,32 @@ class MqttSup(object):
         """internal forward to mqttclient loop_forever"""
         if cls._mqttclient is None:
             cls._mqtt_init()
+        cls._loop_thread = threading.current_thread().name
         cls._mqttclient.loop_forever()
+        cls._loop_thread = None
+
     @classmethod
     def loop_start(cls):
         """internal forward to mqttclient loop_start"""
         if cls._mqttclient is None:
             cls._mqtt_init()
+        cls._loop_thread = threading.current_thread().name
         cls._mqttclient.loop_start()
 
     @classmethod
     def loop_stop(cls):
         """internal forward to mqttclient loop_stop"""
+        cls._loop_thread = None
         cls._mqttclient.loop_stop()
 
+    @classmethod
+    def darf_warten(cls):
+        """nur ausserhalb des Threads mit der "loop" darf gewartet werden"""
+        if cls._loop_thread is None:
+            return False
+        if cls._loop_thread == threading.current_thread().name:
+            return False
+        return True
 
     @classmethod
     def subscribe(cls, pat):
@@ -587,16 +715,27 @@ def main():
     # missing timezone info when running in docker
     os.environ['TZ'] = 'Europe/Berlin'
 
-    global _Status_Helligkeit # pylint: disable=global-statement
-    _Status_Helligkeit = MqttHelligkeit("Sensor/WZTuF/EG/WZ//H", "Aussen-Hellig", 100)
+    sensor_helligkeit = MqttSensor("Sensor/WZTuF/EG/WZ//H", "Aussen-Hellig", 100)
 
-    global _Status_Temperatur # pylint: disable=global-statement
-    _Status_Temperatur = MqttTemperatur("Sensor/WZTuF/EG/WZ//T", "Aussen-Temp", 100)
+    sensor_temperatur = MqttSensor("Sensor/WZTuF/EG/WZ//T", "Aussen-Temp", 100)
 
-    global _Shelly_SZ # pylint: disable=global-statement
-    _Shelly_SZ = Shelly("shellies/shellyswitch25-745815", "SZ", "192.168.2.49")
+    shelly_sz = Shelly("shellies/shellyswitch25-745815", "SZ", "192.168.2.49")
 
-    MqttSup.loop_forever()
+    aktivitaet_schatten = AktivitaetSchattenbeiHitze(
+        "Schatten bei Hitze", sensor_temperatur, sensor_helligkeit, shelly_sz)
+    sensor_temperatur.plus_aktivitaet(aktivitaet_schatten)
+
+    aktivitaet_nachts = AktivitaetNachtsRolloSchliessen(
+        "Nachts Rollo schliessen", sensor_helligkeit, shelly_sz)
+    sensor_helligkeit.plus_aktivitaet(aktivitaet_nachts)
+
+    try:
+        MqttSup.loop_forever()
+    except:
+        # hier kann man nur ankommen, wenn die Loop unterbrochen wurde
+        print("in Interupt")
+        AktivitaetsQueue.stop_queue()
+
 
 if __name__ == '__main__':
     main()
