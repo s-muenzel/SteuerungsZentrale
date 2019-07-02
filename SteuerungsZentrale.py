@@ -18,7 +18,7 @@ import paho.mqtt.client as mqtt
 
 # Debug Level: Liste mit Klassennamen, die print_alles-Methode prueft, ob der Name in der Liste ist
 # Falls ja: print, falls nein: nix
-DEBUG_KLASSE = ["MqttNachricht", "MqttTemperatur", "MqttHelligkeit", "MqttShelly", "Shelly"]
+DEBUG_KLASSE = ["MqttNachricht", "MqttSensor", "MqttShelly", "Shelly"]
 LOGGING_LEVELS = {'critical': logging.CRITICAL,
                   'error': logging.ERROR,
                   'warning': logging.WARNING,
@@ -393,6 +393,7 @@ class MqttSensor(MqttNachricht):
         _LogSup.log().warning("MqttSensor, {name:16s}, Immer noch kein gueltiger Wert".format(
             name=self.m_name))
         return False
+
 
 class MqttShelly(MqttNachricht):
     """Zwischenklasse:
