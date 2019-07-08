@@ -39,7 +39,6 @@ class AktivitaetsQueue(object):
             _LogSup.log().debug("...")
             del cls._queue
             cls._queue = None
-            cls._thread.join()
             del cls._thread
             cls._thread = None
         cls._weiter = False
@@ -58,6 +57,9 @@ class AktivitaetsQueue(object):
 
     @classmethod
     def start_queue(cls):
+        """AktivitaetsQueue:start_queue
+        Initiales Aufsetzen der Queue, start des Thread, in dem die
+        Messages abgearbeitet werden """
         _LogSup.log().debug("AktivitaetsQueue, starte Queue")
         if cls._thread is None:
             cls._weiter = True
@@ -67,11 +69,17 @@ class AktivitaetsQueue(object):
 
     @classmethod
     def stop_queue(cls):
+        """AktivitaetsQueue:stop_queue
+        Setzt den Trigger, die Queue und den Thread zu beenden.
+        Kann bis zu 5 sekunden dauern"""
         _LogSup.log().debug("AktivitaetsQueue, stoppe Queue")
         cls._weiter = False
 
     @classmethod
     def put(cls, msg):
+        """AktivitaetsQueue:put
+        Eine Message(Aktivitaet) in die Queue stellen
+        """
         _LogSup.log().debug("AktivitaetsQueue, neue Nachricht")
         cls._queue.put(msg)
 
@@ -239,7 +247,7 @@ class AktivitaetNachtsRolloSchliessen(Aktivitaet):
         """AktivitaetNachtsRolloSchliessen:trigger_intern
         Pruefen der hinreichenden Bedingungen (2. Schritt)
         Ist es hell genug, ist der Shelly im Auto-Mode und ist der Rollo oben?
-        Falls ja: Fahre Rollo teilweise zu.
+        Falls ja: Fahre Rollo zu.
 
         Jetzt im Aktivitaets-Thread"""
         if self.m_shelly.automatic_mode():
@@ -249,7 +257,7 @@ class AktivitaetNachtsRolloSchliessen(Aktivitaet):
                         n=self.m_name,
                         z=time.strftime("%X"),
                         h=int(self.m_hell_sensor.wert())))
-                self.m_shelly.schliesse_teilweise()
+                self.m_shelly.schliesse_komplett()
                 self.m_lock.acquire()
                 self.m_aktivitaetstimer = time.time()
                 self.m_lock.release()
@@ -436,6 +444,7 @@ class Shelly(object):
         self.m_name = name
         self.m_pattern = pattern
         self.m_ip = ip_addr
+        self.m_triggerlock = threading.RLock()
         # Werte bleiben 1 Stunde gueltig
         self.m_schalter_0 = MqttShelly(pattern + "/input/0", name + "-Schalter 0", 3600, self)
         self.m_schalter_1 = MqttShelly(pattern + "/input/1", name + "-Schalter 1", 3600, self)
@@ -465,6 +474,7 @@ class Shelly(object):
         In der naechsten Schleife sollten dann gueltige Werte da sein.
         """
         _LogSup.log().debug("Shelly, {name:16s}, trigger_mqtt".format(name=self.m_name))
+        self.m_triggerlock.acquire()
         try:
             urllib2.urlopen("http://"+self.m_ip + "/settings?mqtt_update_period=2")
         except urllib2.HTTPError, fehler:
@@ -478,9 +488,10 @@ class Shelly(object):
         ###        else: ### sicherer ist das...
         for i in range(3):
             del i
-            time.sleep(2)
+            time.sleep(1)
             try:
                 urllib2.urlopen("http://"+self.m_ip + "/settings?mqtt_update_period=0")
+                self.m_triggerlock.release() # Erfolg! Lock freigeben
                 return
             except urllib2.HTTPError, fehler:
                 _LogSup.log().error(
@@ -490,6 +501,7 @@ class Shelly(object):
                 _LogSup.log().error(
                     "Shelly, {name:16s}, trigger_mqtt 2 URLError".format(name=self.m_name))
                 _LogSup.log().error(fehler)
+        self.m_triggerlock.release() # Miserfolg, trotzdem Lock freigeben
 
     def automatic_mode(self):
         """Shelly:automatic_mode_oben
@@ -533,23 +545,9 @@ class Shelly(object):
             "Shelly, {name:16s}, automatic_mode_oben ok".format(name=self.m_name))
         return True
 
-    def position(self):
-        """Shelly:position
-        Gibt die aktuelle Position des Rollos an. 100 == oben.
-        """
-        if not self.m_rollo_pos.gueltig():
-            _LogSup.log().warning(
-                "Shelly, {name:16s}, Rollo_Pos kein aktueller Wert".format(
-                    name=self.m_name))
-            return False
-        _LogSup.log().debug(
-            "Shelly, {name:16s}, Position Rollo ist {wert:16s}".format(
-                name=self.m_name, wert=self.m_rollo_pos.wert()))
-        return True
-
     def position_oben(self):
         """Shelly:position
-        Gibt die aktuelle Position des Rollos an. 100 == oben.
+        Gibt die aktuelle Position des Rollos an. [96 - 100] == oben.
         """
         if not self.m_rollo_pos.gueltig():
             _LogSup.log().warning(
@@ -572,25 +570,29 @@ class Shelly(object):
         """Shelly:schliesse_teilweise
         Gibt das Kommando, den Rollo weitgehend (20% Rest) zu zu fahren
         """
+        self.m_triggerlock.acquire() # keine Ueberschneidung mit dem Anfordern 
         if MqttSup.publish(self.m_pattern + "/roller/0/command/pos", "40"):
             _LogSup.log().info(
                 " Shelly, {name:16s}, Rollo faehrt auf 40%".format(name=self.m_name))
         else:
             _LogSup.log().error(
                 "Shelly, {name:16s}, mqtt message failed".format(name=self.m_name))
+        self.m_triggerlock.release()
 
     def schliesse_komplett(self):
         """Shelly:schliesse_komplett
         Gibt das Kommando, den Rollo zu schliessen
         """
-        ###        if MqttSup.publish(self.m_pattern + "/roller/0/command", "close"):
+        ###        if MqttSup.publish(self.m_pattern + "/roller/0/command/go", "close"):
         ### mit pos-Kommando klappt es...
+        self.m_triggerlock.acquire() # keine Ueberschneidung mit dem Anfordern
         if MqttSup.publish(self.m_pattern + "/roller/0/command/pos", "0"):
             _LogSup.log().info(
                 " Shelly, {name:16s}, Rollo wird geschlossen".format(name=self.m_name))
         else:
             _LogSup.log().error(
                 "Shelly,{name:16s}, mqtt message failed".format(name=self.m_name))
+        self.m_triggerlock.release()
 
 
 def on_connect(client, userdata, flags, result):
@@ -732,7 +734,7 @@ def main():
 
     try:
         MqttSup.loop_forever()
-    except:
+    except KeyboardInterrupt:
         # hier kann man nur ankommen, wenn die Loop unterbrochen wurde
         print("in Interupt")
         AktivitaetsQueue.stop_queue()
