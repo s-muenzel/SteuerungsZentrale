@@ -4,15 +4,17 @@
 Dieses Modul steuert die IOT-Geraete bei uns im Haus.
 Es registiert sich auf MQTT-Pattern und triggert basierend auf deren Werte Aktionen
 """
-from __future__ import print_function
+
 
 import os
 import logging
-import optparse
+import argparse
 import time
-import urllib2
+import urllib.request
+import urllib.error
+#, urllib.parse
 import threading
-import Queue
+import queue
 
 import paho.mqtt.client as mqtt
 
@@ -25,7 +27,7 @@ LOGGING_LEVELS = {'critical': logging.CRITICAL,
                   'info': logging.INFO,
                   'debug': logging.DEBUG}
 
-class AktivitaetsQueue(object):
+class AktivitaetsQueue:
     """AktivitaetsQueue
     Singleton-Klasse: startet und verwaltet eine (einzige) Queue"""
     _thread = None
@@ -50,7 +52,7 @@ class AktivitaetsQueue(object):
                 item = cls._queue.get(block=True, timeout=5)
                 item.trigger_intern()
                 cls._queue.task_done()
-            except Queue.Empty:
+            except queue.Empty:
                 pass
         _LogSup.log().warning("AktivitaetsQueue, Queue angehalten")
         cls._mqtt_exit()
@@ -63,7 +65,7 @@ class AktivitaetsQueue(object):
         _LogSup.log().debug("AktivitaetsQueue, starte Queue")
         if cls._thread is None:
             cls._weiter = True
-            cls._queue = Queue.Queue()
+            cls._queue = queue.Queue()
             cls._thread = threading.Thread(target=cls._queue_worker)
             cls._thread.start()
 
@@ -84,7 +86,7 @@ class AktivitaetsQueue(object):
         cls._queue.put(msg)
 
 
-class Aktivitaet(object):
+class Aktivitaet:
     """Aktivitaet
     Mqtt-Nachrichten werden von allen Aktivitaeten (Aktivitaet-Objekte) geprueft, ob ggfs.
     etwas zu tun waere. Falls ja, schiebt die Aktivitaet sich eine Nachricht in die Queue
@@ -98,11 +100,13 @@ class Aktivitaet(object):
     Konfiguration anstatt Programmierung)
     """
 
+    m_name = ""
+
     def __init__(self):
         AktivitaetsQueue.start_queue()
         self.m_lock = threading.RLock()
         _LogSup.log().debug("Aktivitaet,  {name:16s}, __init__".format(
-            name=self))
+            name=self.m_name))
 
 
     def trigger(self):
@@ -119,7 +123,7 @@ class Aktivitaet(object):
         Im 2. Teil werden die notwendigen Bedingungen geprueft.
         Falls diese positiv sind, wird die Aktivitaet aufgerufen"""
         _LogSup.log().debug("Aktivitaet,  {name:16s}, trigger_intern".format(
-            name=self))
+            name=self.m_name))
 
 
 class AktivitaetSchattenbeiHitze(Aktivitaet):
@@ -136,12 +140,12 @@ class AktivitaetSchattenbeiHitze(Aktivitaet):
     """
 
     def __init__(self, name, temp_sensor, hell_sensor, shelly):
-        Aktivitaet.__init__(self)
         self.m_name = name
         self.m_temp_sensor = temp_sensor
         self.m_hell_sensor = hell_sensor
         self.m_shelly = shelly
         self.m_aktivitaetstimer = 0 # Zugriff muss Threadsafe sein
+        Aktivitaet.__init__(self)
 
     def trigger(self):
         """AktivitaetSchattenbeiHitze:trigger
@@ -151,7 +155,7 @@ class AktivitaetSchattenbeiHitze(Aktivitaet):
         Noch im Main-Thread"""
         zeit = time.localtime()
         stunde = zeit.tm_hour
-        if (stunde > 9) and (stunde < 20):
+        if 9 < stunde < 20:
             self.m_lock.acquire()
             aktiv_timeout = time.time() - self.m_aktivitaetstimer
             self.m_lock.release()
@@ -216,11 +220,11 @@ class AktivitaetNachtsRolloSchliessen(Aktivitaet):
     """
 
     def __init__(self, name, hell_sensor, shelly):
-        Aktivitaet.__init__(self)
         self.m_name = name
         self.m_hell_sensor = hell_sensor
         self.m_shelly = shelly
         self.m_aktivitaetstimer = 0 # Zugriff muss Threadsafe sein
+        Aktivitaet.__init__(self)
 
     def trigger(self):
         """AktivitaetNachtsRolloSchliessen:trigger
@@ -230,14 +234,14 @@ class AktivitaetNachtsRolloSchliessen(Aktivitaet):
         Noch im Main-Thread"""
         zeit = time.localtime()
         stunde = zeit.tm_hour
-        if (stunde > 3) and (stunde < 6):
+        if 3 < stunde < 6:
             self.m_lock.acquire()
             aktiv_timeout = time.time() - self.m_aktivitaetstimer
             self.m_lock.release()
             if aktiv_timeout > 3600:
                 if self.m_hell_sensor.gueltig():
                     helligkeit = int(self.m_hell_sensor.wert())
-                    if (helligkeit > 50) and (helligkeit < 1000):
+                    if 50 < helligkeit < 1000:
                         _LogSup.log().debug(
                             "A_NachtsRolloSchliessen, {n:16s}, Helligkeit und Zeit passt".format(
                                 n=self.m_name))
@@ -271,7 +275,7 @@ class AktivitaetNachtsRolloSchliessen(Aktivitaet):
                     n=self.m_name))
 
 
-class MqttNachricht(object):
+class MqttNachricht:
     """MqttNachricht
     Die generelle Klasse fuer Mqtt-Nachrichten.
     Im Konstrutkor bekommt sie einen Namen, ein Pattern und einen Timeout
@@ -432,7 +436,7 @@ class MqttShelly(MqttNachricht):
         return False
 
 
-class Shelly(object):
+class Shelly:
     """Shelly
     Die Shelly Klasse behandelt ein Shelly 2.5, d.h. kann den Status und die Befehle buendeln
     """
@@ -476,12 +480,12 @@ class Shelly(object):
         _LogSup.log().debug("Shelly, {name:16s}, trigger_mqtt".format(name=self.m_name))
         self.m_triggerlock.acquire()
         try:
-            urllib2.urlopen("http://"+self.m_ip + "/settings?mqtt_update_period=2")
-        except urllib2.HTTPError, fehler:
+            urllib.request.urlopen("http://"+self.m_ip + "/settings?mqtt_update_period=2")
+        except urllib.error.HTTPError as fehler:
             _LogSup.log().error(
                 "Shelly, {name:16s}, trigger_mqtt 1 HTTPError".format(name=self.m_name))
             _LogSup.log().error(fehler)
-        except urllib2.URLError, fehler:
+        except urllib.error.URLError as fehler:
             _LogSup.log().error(
                 "Shelly, {name:16s}, trigger_mqtt 1 URLError".format(name=self.m_name))
             _LogSup.log().error(fehler)
@@ -490,14 +494,14 @@ class Shelly(object):
             del i
             time.sleep(1)
             try:
-                urllib2.urlopen("http://"+self.m_ip + "/settings?mqtt_update_period=0")
+                urllib.request.urlopen("http://"+self.m_ip + "/settings?mqtt_update_period=0")
                 self.m_triggerlock.release() # Erfolg! Lock freigeben
                 return
-            except urllib2.HTTPError, fehler:
+            except urllib.error.HTTPError as fehler:
                 _LogSup.log().error(
                     "Shelly, {name:16s}, trigger_mqtt 2 HTTPError".format(name=self.m_name))
                 _LogSup.log().error(fehler)
-            except urllib2.URLError, fehler:
+            except urllib.error.URLError as fehler:
                 _LogSup.log().error(
                     "Shelly, {name:16s}, trigger_mqtt 2 URLError".format(name=self.m_name))
                 _LogSup.log().error(fehler)
@@ -570,7 +574,7 @@ class Shelly(object):
         """Shelly:schliesse_teilweise
         Gibt das Kommando, den Rollo weitgehend (20% Rest) zu zu fahren
         """
-        self.m_triggerlock.acquire() # keine Ueberschneidung mit dem Anfordern 
+        self.m_triggerlock.acquire() # keine Ueberschneidung mit dem Anfordern
         if MqttSup.publish(self.m_pattern + "/roller/0/command/pos", "40"):
             _LogSup.log().info(
                 " Shelly, {name:16s}, Rollo faehrt auf 40%".format(name=self.m_name))
@@ -607,10 +611,10 @@ def on_message(client, userdata, msg):
     """on_message
     MQTT-Callback wenn eine Nachricht ankommt"""
     del client, userdata # nicht benuetzt
-    MqttSup.update(msg.topic, msg.payload)
+    MqttSup.update(msg.topic, msg.payload.decode())
 
 
-class MqttSup(object):
+class MqttSup:
     """Singleton-Klasse fuer den MQTT-Support"""
     _mqttclient = None
     _consumer = []
@@ -690,7 +694,7 @@ class MqttSup(object):
             i.subscribe()
 
 
-class _LogSup(object):
+class _LogSup:
     """Singletonklasse fuer logging"""
     # pylint: disable=too-few-public-methods
     # bewusste Singleton-Klasse, es gibt nur eine sinnvolle Methode
@@ -700,14 +704,29 @@ class _LogSup(object):
     def log(cls):
         """log(): Zugriff auf Singleton fuer Logging"""
         if cls._logger is None:
-            parser = optparse.OptionParser()
-            parser.add_option('-l', '--logging-level', help='Logging level')
-            parser.add_option('-f', '--logging-file', help='Logging file name')
-            (options, args) = parser.parse_args()
-            del args # wird nicht benutzt
-            logging_level = LOGGING_LEVELS.get(options.logging_level, logging.NOTSET)
-            logging.basicConfig(level=logging_level, filename=options.logging_file,
+            parser = argparse.ArgumentParser(description="command line arguments:")
+            parser.add_argument('-l', '--logging-level', help='Logging level', nargs=1)
+            parser.add_argument('-f', '--logging-file', help='Logging file name', nargs=1)
+            (args, extras) = parser.parse_known_args()
+            del extras
+            if args.logging_level is None:
+                logging_level = logging.NOTSET
+            else:
+                logging_level = LOGGING_LEVELS.get(args.logging_level[0], logging.NOTSET)
+            if args.logging_file is None:
+                logging_file = None
+            else:
+                logging_file = args.logging_file[0]
+            logging.basicConfig(level=logging_level, filename=logging_file,
                                 format='%(levelname)s, [%(threadName)s], %(message)s')
+#            parser = optparse.OptionParser()
+#            parser.add_option('-l', '--logging-level', help='Logging level')
+#            parser.add_option('-f', '--logging-file', help='Logging file name')
+#            (options, args) = parser.parse_args()
+#            del args # wird nicht benutzt
+#            logging_level = LOGGING_LEVELS.get(options.logging_level, logging.NOTSET)
+#            logging.basicConfig(level=logging_level, filename=options.logging_file,
+#                                format='%(levelname)s, [%(threadName)s], %(message)s')
             cls._logger = logging.getLogger()
         return cls._logger
 
